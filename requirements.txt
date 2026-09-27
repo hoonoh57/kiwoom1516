@@ -1,0 +1,4 @@
+# Web app: direct dependencies from the existing 64-bit Python 3.13 environment.
+fastapi==0.141.1
+pydantic==2.13.5
+uvicorn==0.53.0

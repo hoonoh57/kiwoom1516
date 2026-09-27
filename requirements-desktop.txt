@@ -1,0 +1,3 @@
+# Optional 64-bit desktop UI; independent of the web app.
+PyQt5==5.15.11
+pandas==3.0.6

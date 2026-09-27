@@ -1,0 +1,3 @@
+# Install separately with 32-bit Python for Cybos COM access.
+# The installed 32-bit bridge version has not been pinned/verified here.
+pywin32; sys_platform == "win32"

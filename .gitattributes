@@ -1,0 +1,7 @@
+* text=auto eol=lf
+*.bat text eol=crlf
+
+# Regression tests hash the frozen source and compare its prefix byte-for-byte.
+# Do not normalize either file during add/checkout, even with core.autocrlf=true.
+static/app.js -text
+tests/fixtures/app.pre-s44.js -text
