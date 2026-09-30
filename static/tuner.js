@@ -134,7 +134,8 @@ function evalCase(d, c, P, mode, v) {
   let r = null, line = null, skip = null;
   if (mode === 'capture') {
     const mfe = c.officialMfeVal;
-    if (P.gate && mfe != null && mfe < v) skip = '1516 MFE 미달';
+    if (P.real) { r = callF(bars, P, d.date, v, true, null); line = r.basePrice || null; }
+    else if (P.gate && mfe != null && mfe < v) skip = '1516 MFE 미달';
     else { r = callF(bars, P, d.date, v, P.gate, mfe); line = r.basePrice || null; }
   } else {
     const r0 = callF(bars, P, d.date, 5.5, true, null);
@@ -162,6 +163,7 @@ function evalCase(d, c, P, mode, v) {
   if (o.entered) {
     const i = entryIdx(bars, r);
     o.idx = i; o.entryPrice = i >= 0 ? bars[i].close : null;
+    o.path = (o.entryPrice != null && r.basePrice > 0 && o.entryPrice < r.basePrice) ? '조기' : '일반';
     if (i >= 0) {
       let mx = -Infinity;
       for (let j = Math.max(0, i - P.K + 1); j <= i; j++) {
@@ -335,6 +337,7 @@ function params() {
   return {
     strat: $('p-strat').value, gate: $('p-gate').checked, N0: num('p-n0', 5.5), macd: num('p-macd', 0.15),
     cumGate: $('p-cum').checked, minCum: num('p-mincum', 3), hardStop: parseFloat($('p-hs').value) || -2.5,
+    real: !!($('p-real') && $('p-real').checked),
     stopMode: $('p-stopmode') ? $('p-stopmode').value : 'close',
     cost: num('p-cost', 0.25), mode: document.querySelector('input[name=p-mode]:checked').value,
     vFrom: num('p-vfrom', 5.5), vTo: num('p-vto', 5.5), vStep: num('p-vstep', 0.5),
@@ -410,15 +413,16 @@ function desc(P, best) {
   let s = `${P.strat} + 기준선(${MODE_NAME[P.mode]} ${best.v}%)`;
   if (P.mode === 'capture' && best.v === P.N0) s = `${P.strat} 기준선 그대로`;
   if (best.x != null) s += ` + 급등필터 X=${best.x}% (${P.K}봉)`;
+  if (P.real) s += ' · 실전모드 S4.3-R';
   s += ` · 손절 ${P.stopMode === 'low' ? '봉저가' : '봉종가'}`;
   return s;
 }
 function renderExp() {
   const E = S.exp, R = E.rows;
-  const P = E.P, base = E.base;
+  const P = E.P, base = E.base || [];
   let h = `<div class="box">앞 절반(학습) ${E.datesA[0]}~${E.datesA[E.datesA.length - 1]} (${E.datesA.length}일) · 뒤 절반(확인) ${E.datesB.length ? E.datesB[0] + '~' + E.datesB[E.datesB.length - 1] : '없음'} (${E.datesB.length}일)` +
     (E.datesA.length + E.datesB.length < 4 ? ' <span class="warn">※ 4일 미만: 판정 신뢰 불가</span>' : '') + '</div>';
-  h += `<p><b>실험 결과 · ${P.gate ? '1516 게이트 ON' : '기준선 없음'} · ${esc(P.strat)} · 손절 ${P.stopMode === 'low' ? '봉저가' : '봉종가'}${P.stopMode === 'low' ? ` (전환 ${base.filter(o => o.reason === '봉저손절').length}건)` : ''}</b></p>`;
+  h += `<p><b>실험 결과 · ${P.real ? '실전모드 S4.3-R' : P.gate ? '1516 게이트 ON' : '기준선 없음'} · ${esc(P.strat)} · 손절 ${P.stopMode === 'low' ? '봉저가' : '봉종가'}${P.stopMode === 'low' ? ` (전환 ${base.filter(o => o.reason === '봉저손절').length}건)` : ''}</b></p>`;
   h += `<div class="hint">앞 절반 순효과(박제 대비 순익합 차이, %p). 노란 테두리가 고원 점수(주변 ±2%p 평균) 최고 조합입니다.</div><table><tr><th class="l">${MODE_NAME[E.P.mode]} \\ 급등 X</th>` +
     E.xs.map(x => `<th>${x == null ? '필터 끔' : x + '%'}</th>`).join('') + '</tr>';
   for (const v of E.vs) {
@@ -443,7 +447,13 @@ function renderExp() {
   h += `<div class="box">판정: <b class="${E.status === '채택 후보' ? 'ok' : 'warn'}">${E.status}</b> &nbsp; ` +
     E.checks.map(c => `${esc(c.t)} ${c.ok ? '<span class="ok">✔</span>' : '<span class="bad">✖</span>'}`).join(' / ') +
     ` &nbsp; <button class="sub" id="btn-save-ver">버전 기록에 저장</button></div>`;
-  $('exp-out').innerHTML = h;
+  const pathRow = k => {
+    const m = metrics(base.filter(o => o.path === k));
+    return `<tr><td>${k}진입</td><td>${m.n}</td><td>${fp(m.sum)}</td><td>${m.win.toFixed(1)}%</td><td>${m.stopRate.toFixed(1)}%</td><td>${f2(m.pf)}</td></tr>`;
+  };
+  const paths = `<p><b>${P.real ? '실전모드 S4.3-R' : P.gate ? '1516 게이트 ON' : '기준선 없음'} · 진입 경로별</b></p>` +
+    `<table><tr><th>경로</th><th>거래</th><th>순익합</th><th>승률</th><th>손절률</th><th>PF</th></tr>${pathRow('일반')}${pathRow('조기')}</table>`;
+  $('exp-out').innerHTML = paths + h;
   $('btn-save-ver').addEventListener('click', saveVersion);
 }
 
@@ -546,7 +556,8 @@ function runDiag() {
   const mfe = lst.found ? lst.mfe : null;
   const bars = cloneBars(c.candles, d.date, k);
   let r = null, skip = null;
-  if (P.gate && mfe != null && mfe < P.N0) skip = `1516 MFE 미달 (09:0${t})`;
+  if (P.real) r = callF(bars, P, d.date, P.N0, true, null);
+  else if (P.gate && mfe != null && mfe < P.N0) skip = `1516 MFE 미달 (09:0${t})`;
   else r = callF(bars, P, d.date, P.N0, P.gate, mfe);
   const o = outcome(r, skip, P.cost);
   const i = entryIdx(bars, r);
@@ -634,6 +645,9 @@ function showTab(t) {
   const s = document.createElement('label');
   s.innerHTML = ' 손절적용 <select id="p-stopmode"><option value="close">봉종가</option><option value="low">봉저가</option></select>';
   l.insertAdjacentElement('afterend', s);
+  const g = $('p-gate'), rl = document.createElement('label');
+  rl.innerHTML = ' <input type="checkbox" id="p-real"> 실전모드 S4.3-R (1516 사전제외 없이 실시간 기준선과 조기가속 예외만 적용)';
+  (g.closest('label') || g).insertAdjacentElement('afterend', rl);
 })();
 document.querySelectorAll('.tabs button').forEach(b => b.addEventListener('click', () => !b.disabled && showTab(b.dataset.t)));
 $('in-dir').addEventListener('change', e => readFiles(e.target.files));
