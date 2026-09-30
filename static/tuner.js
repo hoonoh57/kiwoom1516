@@ -532,7 +532,7 @@ function drawChart(diag) {
     S.ser.s.setData(lineData(bars, diag.r.entryStartIdx, d.date, diag.r.basePrice));
   } else S.ser.s.setData([]);
   mk.sort((a, z) => a.time - z.time);
-  S.ser.c.setMarkers(mk);
+  S.ser.c.setMarkers(mk); if (window.S4X) window.S4X.onDraw({ d, c, P, bars, b, mk });
   S.chart.timeScale().fitContent();
   $('ch-title').innerHTML = `<b>${esc(c.name)} (${esc(c.code)}) · ${d.date} · ${esc(d.tf)}</b>`;
   const cap = b.line ? b.line / (1 + P.N0 / 100) : null;

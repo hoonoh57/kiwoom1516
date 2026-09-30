@@ -44,7 +44,8 @@ const EA = { ...EA0 };
 let FV = null;
 const FE = FAM.find(F => F.key === 'early');
 const eKey = g => JSON.stringify(g);
-const setEA = g => Object.assign(EA, EA0, !g ? {} : g.t === 'off' ? { on: false } : g.t === 'time' ? { t: g.v } : g.t === 'cum' ? { cum: g.v } : { macd: g.v });
+const eaOf = g => Object.assign({}, EA0, !g ? {} : g.t === 'off' ? { on: false } : g.t === 'time' ? { t: g.v } : g.t === 'cum' ? { cum: g.v } : { macd: g.v });
+const setEA = g => Object.assign(EA, eaOf(g));
 async function loadVariant() {
   if (FV) return;
   const response = await fetch('/static/app.js', { cache: 'no-store' });
@@ -113,7 +114,7 @@ async function buildRecs(P, days, tag, variant = undefined) {
       if (variant !== undefined) { setEA(variant); S.F = FV; }
       e = T.evalCase(d, c, P, 'capture', P.N0);
     } finally { S.F = F0; setEA(null); }
-    const rec = { d, c, o: e.o, half: A.has(d.key) ? 'A' : 'B', ok: false };
+    const rec = { d, c, o: e.o, half: A.has(d.key) ? 'A' : 'B', ok: false, mk: (e.r && e.r.markers) || [], basePrice: e.r && e.r.basePrice };
     if (e.o.entered && !e.o.open && e.o.idx >= 0 && e.o.entryPrice > 0) feat(rec, e);
     out.push(rec);
     if (++k % 50 === 0) { $('lb-prog').textContent = `${tag} ${k}/${tot}…`; await tick(); }
@@ -158,7 +159,7 @@ function applyCfg(rec, cfg) {
       hi = Math.max(hi, +bars[i].high);
       if (hi >= ep * (1 + a / 100) && +bars[i].close <= hi * (1 - b / 100)) {
         const pnl = (+bars[i].close / ep - 1) * 100;
-        res = { entered: true, open: false, pnl, net: pnl - cost, stop: false, why: `이익보호 청산 ${HM(bars[i].time)}` };
+        res = { entered: true, open: false, pnl, net: pnl - cost, stop: false, why: `이익보호 청산 ${HM(bars[i].time)}`, exitTimestamp: bars[i].timestamp, exitPrice: +bars[i].close };
         break;
       }
     }
@@ -314,7 +315,10 @@ function renderDetail(k) {
   $('lb-freeze').addEventListener('click', () => freeze(c));
   $('lb-again').addEventListener('click', () => again(c));
   $('lb-detail').querySelectorAll('tr.click').forEach(tr => tr.addEventListener('click', () => {
-    const r = L.recs[+tr.dataset.i];
+    const i = +tr.dataset.i, r = L.recs[i], cfg = e.cfg, vr = recsFor(cfg)[i];
+    if (window.S4X) window.S4X.setVariant({ key: r.d.key + '|' + r.c.code, name: p.label,
+      baseEA: eaOf(L.baseCfg.early), newEA: eaOf(cfg.early), rec: vr, res: applyCfg(vr, cfg),
+      baseRec: r, baseRes: L.baseRes[i] });
     try { T.openChart(r.d.key, r.c.code, L.P); T.showTab('chart'); }
     catch (err) { console.warn(err); alert('차트를 열지 못했습니다. 2 실험 탭에서 실험을 한 번 실행한 뒤 다시 눌러 주세요.'); }
   }));
