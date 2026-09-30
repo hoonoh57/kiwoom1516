@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<title>S4 Tuner</title>
+<script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
+<style>
+body{margin:0;background:#0b1220;color:#d1d5db;font:13px/1.5 'Malgun Gothic',sans-serif}
+header{padding:10px 14px;background:#111827;border-bottom:1px solid #1f2937}
+h1{font-size:16px;margin:0 0 6px;color:#38bdf8}
+.row{display:flex;gap:14px;align-items:center;flex-wrap:wrap}
+.tabs{display:flex;gap:4px;margin-top:8px}
+.tabs button{background:#1f2937;color:#9ca3af;border:0;padding:6px 14px;border-radius:4px 4px 0 0;cursor:pointer}
+.tabs button.on{background:#2563eb;color:#fff}
+.tabs button:disabled{opacity:.35;cursor:not-allowed}
+section{display:none;padding:12px 14px}
+section.on{display:block}
+table{border-collapse:collapse;width:100%;margin:8px 0}
+th,td{border-bottom:1px solid #1f2937;padding:4px 6px;text-align:right;white-space:nowrap}
+th{color:#9ca3af;background:#111827;position:sticky;top:0}
+td.l,th.l{text-align:left}
+input[type=number],input[type=text],select{background:#0f172a;color:#e5e7eb;border:1px solid #334155;padding:3px 5px;width:64px}
+select{width:auto}
+button.act{background:#2563eb;color:#fff;border:0;padding:6px 16px;border-radius:4px;cursor:pointer}
+button.sub{background:#334155;color:#e5e7eb;border:0;padding:4px 10px;border-radius:4px;cursor:pointer}
+fieldset{border:1px solid #1f2937;margin:8px 0;padding:8px 10px}
+legend{color:#38bdf8}
+.ok{color:#34d399}.bad{color:#f87171}.warn{color:#fbbf24}.pos{color:#f87171}.neg{color:#60a5fa}.mut{color:#6b7280}
+.scroll{max-height:62vh;overflow:auto}
+tr.click{cursor:pointer} tr.click:hover{background:#1e293b}
+#chart{height:430px;border:1px solid #1f2937}
+.hint{color:#9ca3af;font-size:12px}
+.box{background:#111827;border:1px solid #1f2937;padding:8px 10px;margin:8px 0}
+</style>
+</head>
+<body>
+<header>
+  <h1>S4 Tuner <span class="mut">· 박제 S4 + 보완 피처 검증</span></h1>
+  <div class="row">
+    <b id="st-data">데이터 없음</b>
+    <span id="st-check">재현검사: 대기</span>
+    <span id="st-sha" class="mut"></span>
+  </div>
+  <div class="tabs">
+    <button data-t="data" class="on">1 데이터</button>
+    <button data-t="exp" disabled>2 실험</button>
+    <button data-t="trades" disabled>3 거래비교</button>
+    <button data-t="chart" disabled>4 차트진단</button>
+    <button data-t="ver" disabled>5 버전기록</button>
+  </div>
+</header>
+
+<section id="t-data" class="on">
+  <div class="row">
+    <label>데이터 폴더 <input type="file" id="in-dir" webkitdirectory multiple></label>
+    <label>또는 파일 <input type="file" id="in-files" accept=".json" multiple></label>
+    <label>주 포착시각 <input type="text" id="p-ct" value="090300"></label>
+    <label>TF <select id="p-tf"></select></label>
+    <button class="sub" id="btn-recheck">재현검사 다시</button>
+  </div>
+  <div class="hint">기존 화면의 배치 다운로더 JSON(MFE 기준 -100, 360틱, 하루씩 수집)을 한 폴더에 모아 선택하세요. 파일은 읽기만 합니다.</div>
+  <div id="data-warn"></div>
+  <div class="scroll"><table id="tb-data"></table></div>
+  <div id="diag-lists" class="hint"></div>
+</section>
+
+<section id="t-exp">
+  <fieldset><legend>기준 전략과 공통 설정 (모든 버전에 동일 적용)</legend>
+    <div class="row">
+      <label>기준 전략 <select id="p-strat"><option>S4</option><option>S4.1</option><option>S4.2</option><option selected>S4.3</option></select></label>
+      <label><input type="checkbox" id="p-gate" checked> 1516 MFE 게이트</label>
+      <label>박제 N <input type="number" id="p-n0" value="5.5" step="0.1">%</label>
+      <label>MACD <input type="number" id="p-macd" value="0.15" step="0.01"></label>
+      <label><input type="checkbox" id="p-cum" checked> 누적대금 <input type="number" id="p-mincum" value="3" step="1">억</label>
+      <label>하드스탑 <input type="number" id="p-hs" value="-3.0" step="0.1">%</label>
+      <label>비용 <input type="number" id="p-cost" value="0.25" step="0.05">%/거래</label>
+    </div>
+  </fieldset>
+  <fieldset><legend>기준선</legend>
+    <div class="row">
+      <label><input type="radio" name="p-mode" value="capture" checked> 포착가 대비 (박제)</label>
+      <label><input type="radio" name="p-mode" value="open"> 시가 대비</label>
+      <label><input type="radio" name="p-mode" value="prev"> 전일종가 대비</label>
+      <label>범위 <input type="number" id="p-vfrom" value="5.5" step="0.5"> ~ <input type="number" id="p-vto" value="5.5" step="0.5">% 간격 <input type="number" id="p-vstep" value="0.5" step="0.5"></label>
+    </div>
+    <div class="hint">시가·전일종가 기준은 기준선에 한 번이라도 닿은 종목(10:03까지)만 전략으로 보내고, 진입은 원본 규칙대로 종가가 그 기준선 이상일 때 합니다.</div>
+  </fieldset>
+  <fieldset><legend>보완 피처</legend>
+    <div class="row">
+      <label><input type="checkbox" id="p-surge"> 단일봉 급등 필터</label>
+      <label>X <input type="number" id="p-xfrom" value="4" step="1"> ~ <input type="number" id="p-xto" value="14" step="1">% 간격 <input type="number" id="p-xstep" value="1" step="0.5"></label>
+      <label>검사 봉 수 <input type="number" id="p-k" value="2" step="1"> (진입봉 포함)</label>
+    </div>
+    <div class="hint">진입 순간에 진입봉·직전봉의 (고가−시가)/시가가 X%를 넘으면 진입하지 않습니다. 수익·손실 종목 모두 똑같이 적용하고, 차단된 종목은 그날 재진입하지 않습니다.</div>
+  </fieldset>
+  <div class="row"><button class="act" id="btn-run">실험 실행</button><span id="exp-prog" class="hint"></span></div>
+  <div id="exp-out"></div>
+</section>
+
+<section id="t-trades">
+  <div class="row">
+    <label>판정 <select id="f-cls"><option value="">전체</option><option>막은손실</option><option>놓친수익</option><option>개선</option><option>악화</option><option>승자훼손</option><option>신규진입</option><option>판정불가</option><option>동일</option></select></label>
+    <label><input type="checkbox" id="f-loss"> 박제 손실 거래만</label>
+    <label><input type="checkbox" id="f-hide" checked> 둘 다 미진입 숨김</label>
+    <span id="tr-sum" class="hint"></span>
+  </div>
+  <div class="scroll"><table id="tb-trades"></table></div>
+</section>
+
+<section id="t-chart">
+  <div id="ch-title" class="row"><b>거래비교 탭에서 행을 클릭하세요.</b></div>
+  <div id="chart"></div>
+  <div id="ch-info" class="box"></div>
+  <fieldset><legend>기준시각 진단 (선택한 종목만)</legend>
+    <div class="row">
+      <label>기준시각 09:03 → <select id="dg-t0"><option value="2">09:02</option><option value="1">09:01</option><option value="0">09:00</option></select></label>
+      <button class="sub" id="btn-diag">다시 계산</button>
+    </div>
+    <div class="hint">변경한 기준시각만큼 전략의 모든 시간창(포착·진입·마감)을 함께 앞당겨 계산합니다. 1516에서 그 시각에 포착되는지는 직접 확인하세요. 해당 시각 목록 JSON을 불러오면 자동으로 표시합니다.</div>
+    <div id="dg-out" class="box"></div>
+    <div class="row"><input type="text" id="dg-memo" style="width:480px" placeholder="원인 메모 (예: 급등봉 한 개로 기준선 통과, 추격 진입)"><button class="sub" id="btn-case">사례 저장</button><button class="sub" id="btn-case-exp">사례 JSON 저장</button></div>
+    <div class="scroll" style="max-height:30vh"><table id="tb-cases"></table></div>
+  </fieldset>
+</section>
+
+<section id="t-ver">
+  <div class="row">
+    <button class="sub" id="btn-ver-check">새 날짜 재확인</button>
+    <button class="sub" id="btn-ver-exp">기록 JSON 저장</button>
+    <label class="sub">기록 불러오기 <input type="file" id="in-ver" accept=".json"></label>
+  </div>
+  <div class="scroll"><table id="tb-ver"></table></div>
+</section>
+
+<script src="/static/tuner.js"></script>
+</body>
+</html>
