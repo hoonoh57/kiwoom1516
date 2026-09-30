@@ -1,6 +1,6 @@
 /* static/tuner.js — S4 Tuner v1
    원칙: app.js(박제 원본)는 읽기만 한다. 전략 판정은 원본 evaluateStrategyTrade를 그대로 호출한다.
-   보완은 (1) 기준선 선택 (2) 단일봉 급등 필터 두 가지이며, 원본 호출 전/후에서만 작동한다. */
+   보완은 (1) 기준선 선택 (2) 단일봉 급등 필터 (3) 봉저가 손절이며, 원본 호출 전/후에서만 작동한다. */
 (function () {
 'use strict';
 const $ = id => document.getElementById(id);
@@ -96,6 +96,39 @@ function outcome(r, skip, cost) {
 function callF(bars, P, date, n, gate, mfe) {
   return S.F(bars, P.strat, date, n, P.macd, gate, mfe, P.cumGate, P.minCum, P.hardStop);
 }
+// 첫 익절 또는 원본 청산 봉까지만 검사한다. 분할 익절 이후는 원본 결과를 유지한다.
+function applyStopMode(o, r, bars, P) {
+  if (P.stopMode !== 'low' || !o.entered || o.entryPrice == null || !r) return o;
+  const mk = r.markers || [];
+  if (!mk.length) { console.warn('봉저가 손절: 원본 결과에 markers가 없어 적용하지 못했습니다'); return o; }
+  const i0 = entryIdx(bars, r); if (i0 < 0) return o;
+  const downs = mk.filter(m => m.shape === 'arrowDown');
+  const exitTs = downs.length ? downs[downs.length - 1].time : Infinity;
+  const tp = mk.find(m => /익절/.test(m.text || ''));
+  const limitTs = Math.min(exitTs, tp ? tp.time : Infinity);
+  const hs = Number(P.hardStop ?? P.stop ?? -3);
+  const sp = o.entryPrice * (1 + hs / 100);
+  for (let i = i0 + 1; i < bars.length && bars[i].timestamp <= limitTs; i++) {
+    if (bars[i].date !== bars[i0].date) break;
+    if (+bars[i].low <= sp) {
+      const fill = +bars[i].open <= sp ? +bars[i].open : sp;
+      o.pnl = (fill / o.entryPrice - 1) * 100;
+      o.net = o.pnl - P.cost;
+      o.open = false; o.stop = true; o.reason = '봉저손절'; o.stopTouch = hm(bars[i].timestamp);
+      o.exitTimestamp = bars[i].timestamp; o.exitPrice = fill;
+      return o;
+    }
+  }
+  return o;
+}
+function resultMarkers(r, o) {
+  const mk = r ? r.markers || [] : [];
+  if (o.reason !== '봉저손절') return mk;
+  return mk.filter(m => m.time < o.exitTimestamp).concat({
+    time: o.exitTimestamp, position: 'aboveBar', color: '#3b82f6', shape: 'arrowDown',
+    text: `[봉저손절] ${won(o.exitPrice)}`
+  });
+}
 function evalCase(d, c, P, mode, v) {
   const bars = prep(d, c);
   let r = null, line = null, skip = null;
@@ -138,6 +171,7 @@ function evalCase(d, c, P, mode, v) {
       sp = Number.isFinite(mx) ? mx : null;
     }
   }
+  applyStopMode(o, r, bars, P);
   return { o, sp, line, r, bars };
 }
 function applyX(o, sp, x) {
@@ -301,6 +335,7 @@ function params() {
   return {
     strat: $('p-strat').value, gate: $('p-gate').checked, N0: num('p-n0', 5.5), macd: num('p-macd', 0.15),
     cumGate: $('p-cum').checked, minCum: num('p-mincum', 3), hardStop: parseFloat($('p-hs').value) || -2.5,
+    stopMode: $('p-stopmode') ? $('p-stopmode').value : 'close',
     cost: num('p-cost', 0.25), mode: document.querySelector('input[name=p-mode]:checked').value,
     vFrom: num('p-vfrom', 5.5), vTo: num('p-vto', 5.5), vStep: num('p-vstep', 0.5),
     surge: $('p-surge').checked, xFrom: num('p-xfrom', 4), xTo: num('p-xto', 14), xStep: num('p-xstep', 1),
@@ -375,12 +410,15 @@ function desc(P, best) {
   let s = `${P.strat} + 기준선(${MODE_NAME[P.mode]} ${best.v}%)`;
   if (P.mode === 'capture' && best.v === P.N0) s = `${P.strat} 기준선 그대로`;
   if (best.x != null) s += ` + 급등필터 X=${best.x}% (${P.K}봉)`;
+  s += ` · 손절 ${P.stopMode === 'low' ? '봉저가' : '봉종가'}`;
   return s;
 }
 function renderExp() {
   const E = S.exp, R = E.rows;
+  const P = E.P, base = E.base;
   let h = `<div class="box">앞 절반(학습) ${E.datesA[0]}~${E.datesA[E.datesA.length - 1]} (${E.datesA.length}일) · 뒤 절반(확인) ${E.datesB.length ? E.datesB[0] + '~' + E.datesB[E.datesB.length - 1] : '없음'} (${E.datesB.length}일)` +
     (E.datesA.length + E.datesB.length < 4 ? ' <span class="warn">※ 4일 미만: 판정 신뢰 불가</span>' : '') + '</div>';
+  h += `<p><b>실험 결과 · ${P.gate ? '1516 게이트 ON' : '기준선 없음'} · ${esc(P.strat)} · 손절 ${P.stopMode === 'low' ? '봉저가' : '봉종가'}${P.stopMode === 'low' ? ` (전환 ${base.filter(o => o.reason === '봉저손절').length}건)` : ''}</b></p>`;
   h += `<div class="hint">앞 절반 순효과(박제 대비 순익합 차이, %p). 노란 테두리가 고원 점수(주변 ±2%p 평균) 최고 조합입니다.</div><table><tr><th class="l">${MODE_NAME[E.P.mode]} \\ 급등 X</th>` +
     E.xs.map(x => `<th>${x == null ? '필터 끔' : x + '%'}</th>`).join('') + '</tr>';
   for (const v of E.vs) {
@@ -475,11 +513,11 @@ function drawChart(diag) {
   const startIdx = b.r ? b.r.entryStartIdx : -1;
   S.ser.b.setData(lineData(bars, startIdx, d.date, b.line));
   S.ser.v.setData(v && (P.mode !== 'capture' || S.exp.best.v !== P.N0) ? lineData(bars, startIdx, d.date, v.line) : []);
-  let mk = (b.r ? b.r.markers : []).map(m => ({ ...m, text: '박제 ' + m.text }));
-  if (v && v.r && vo.entered) mk = mk.concat(v.r.markers.map(m => ({ ...m, color: '#a78bfa', shape: m.position === 'belowBar' ? 'arrowUp' : 'circle', text: '새 ' + m.text })));
+  let mk = resultMarkers(b.r, b.o).map(m => ({ ...m, text: '박제 ' + m.text }));
+  if (v && v.r && vo.entered) mk = mk.concat(resultMarkers(v.r, vo).map(m => ({ ...m, color: '#a78bfa', shape: m.position === 'belowBar' ? 'arrowUp' : 'circle', text: '새 ' + m.text })));
   if (diag && diag.r) {
     const map = new Map(diag.bars.map((x, i) => [x.timestamp, i]));
-    mk = mk.concat(diag.r.markers.map(m => { const i = map.get(m.time); return i == null ? null : { ...m, time: bars[i].timestamp, color: '#22d3ee', text: '시각 ' + m.text }; }).filter(Boolean));
+    mk = mk.concat(resultMarkers(diag.r, diag.o).map(m => { const i = map.get(m.time); return i == null ? null : { ...m, time: bars[i].timestamp, color: '#22d3ee', text: '시각 ' + m.text }; }).filter(Boolean));
     S.ser.s.setData(lineData(bars, diag.r.entryStartIdx, d.date, diag.r.basePrice));
   } else S.ser.s.setData([]);
   mk.sort((a, z) => a.time - z.time);
@@ -512,6 +550,8 @@ function runDiag() {
   else r = callF(bars, P, d.date, P.N0, P.gate, mfe);
   const o = outcome(r, skip, P.cost);
   const i = entryIdx(bars, r);
+  o.entryPrice = i >= 0 ? bars[i].close : null;
+  applyStopMode(o, r, bars, P);
   const orig = evalCase(d, c, P, 'capture', P.N0).o;
   let j;
   if (orig.entered && !orig.open && orig.net < 0) j = o.entered && !o.open ? (o.net > 0 ? '착시손실' : '진짜손실') : '미진입(손실회피)';
@@ -529,7 +569,7 @@ function runDiag() {
     `판정: <b>${j}</b> <span class="mut">(시간창 전체를 ${k}분 앞당겨 계산)</span>`;
   S.lastDiag = { date: d.date, code: c.code, name: c.name, t0: '09:0' + t, listFound: lst.list ? lst.found : null,
     orig: orig.entered && !orig.open ? +orig.net.toFixed(3) : null, shifted: o.entered && !o.open ? +o.net.toFixed(3) : null, judge: j };
-  drawChart({ r, bars });
+  drawChart({ r, bars, o });
 }
 function saveCase() {
   if (!S.lastDiag) return alert('먼저 [다시 계산]으로 진단하세요.');
@@ -588,6 +628,13 @@ function showTab(t) {
   document.querySelectorAll('section').forEach(s => s.classList.toggle('on', s.id === 't-' + t));
   if (t === 'chart') { ensureChart(); S.chart.applyOptions({ width: $('chart').clientWidth }); }
 }
+(function addStopBox() {
+  if ($('p-stopmode')) return;
+  const l = $('p-hs').closest('label');
+  const s = document.createElement('label');
+  s.innerHTML = ' 손절적용 <select id="p-stopmode"><option value="close">봉종가</option><option value="low">봉저가</option></select>';
+  l.insertAdjacentElement('afterend', s);
+})();
 document.querySelectorAll('.tabs button').forEach(b => b.addEventListener('click', () => !b.disabled && showTab(b.dataset.t)));
 $('in-dir').addEventListener('change', e => readFiles(e.target.files));
 $('in-files').addEventListener('change', e => readFiles(e.target.files));
