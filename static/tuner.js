@@ -210,6 +210,7 @@ function cls(b, v) {
   return dd > 1e-9 ? '개선' : dd < -1e-9 ? '악화' : '동일';
 }
 const pick = (arr, idx) => idx.map(i => arr[i]);
+window.S4T = { S, evalCase, metrics, params, usedDays, fp, esc, openChart: (...a) => openChart(...a), showTab: (...a) => showTab(...a) };
 
 /* ───────── 5. 데이터 불러오기 ───────── */
 function isIntraday(d) {
@@ -506,18 +507,18 @@ function lineData(bars, from, date, value) {
   if (!(value > 0) || from < 0) return [];
   return bars.filter((b, i) => i >= from && b.date === date).map(b => ({ time: b.timestamp, value }));
 }
-function openChart(dkey, code) {
+function openChart(dkey, code, chartParams = null) {
   const d = S.days.find(x => x.key === dkey), c = d && d.cases.find(x => x.code === code);
   if (!c) return;
-  S.cur = { d, c }; S.lastDiag = null;
+  S.cur = { d, c, P: chartParams }; S.lastDiag = null;
   showTab('chart'); ensureChart(); drawChart(null);
   $('dg-out').innerHTML = '기준시각을 고르고 [다시 계산]을 누르세요.';
 }
 function drawChart(diag) {
-  const { d, c } = S.cur, P = S.exp ? S.exp.P : params();
+  const { d, c } = S.cur, P = S.cur.P || (S.exp ? S.exp.P : params());
   const bars = prep(d, c);
   const b = evalCase(d, c, P, 'capture', P.N0);
-  const v = S.exp ? evalCase(d, c, P, P.mode, S.exp.best.v) : null;
+  const v = !S.cur.P && S.exp ? evalCase(d, c, P, P.mode, S.exp.best.v) : null;
   const vo = v ? applyX(v.o, v.sp, S.exp.best.x) : null;
   S.ser.c.setData(bars.filter(x => x.date === d.date).map(x => ({ time: x.timestamp, open: x.open, high: x.high, low: x.low, close: x.close })));
   const startIdx = b.r ? b.r.entryStartIdx : -1;
@@ -550,7 +551,7 @@ function findMfe(date, t, tf, code) {
 }
 function runDiag() {
   if (!S.cur) return;
-  const { d, c } = S.cur, P = S.exp ? S.exp.P : params();
+  const { d, c } = S.cur, P = S.cur.P || (S.exp ? S.exp.P : params());
   const t = +$('dg-t0').value, k = 3 - t;
   const lst = findMfe(d.date, t, d.tf, c.code);
   const mfe = lst.found ? lst.mfe : null;
