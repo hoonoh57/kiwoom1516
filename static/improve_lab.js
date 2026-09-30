@@ -1,6 +1,6 @@
 /* static/improve_lab.js — S4.3 개선 Lab (6번 탭)
-   1) 원본 app.js 판정은 tuner.js의 evalCase로 한 번만 돌리고, 처방은 그 결과 위에서만 적용한다.
-   2) 진입 처방은 원본 진입을 막기만 한다. 막힌 종목은 그날 재진입하지 않는다(실험 탭 급등필터와 같은 규칙).
+   1) 원본 app.js 파일은 보존한다. 원본 및 조기가속 변형 판정은 tuner.js의 evalCase를 사용한다.
+   2) 조기진입은 메모리 사본으로 재시뮬레이션한다. 추격 상한은 해당 결과의 진입을 막는다.
    3) 청산 처방은 원본의 첫 익절·청산 이전 봉에서만, 봉종가로 판정한다.
    4) 처방은 옵션 조합(cfg)이고, 박제 버전은 그 cfg를 저장한 것이다. */
 (function () {
@@ -19,9 +19,13 @@ const L = { busy: false, key: '', recs: [], dates: [], P: null, mode: 'real', ba
 
 /* ───────── 처방 목록 (대상 문제별 옵션과 시험 범위) ───────── */
 const FAM = [
-  { key: 'early', title: '조기진입 제한', target: '큰 손절',
-    grids: [[{ t: 'off' }], ['0906', '0908', '0910'].map(v => ({ t: 'time', v })), [20, 30, 40, 50].map(v => ({ t: 'cum', v }))],
-    label: g => g.t === 'off' ? '조기가속 진입 끄기' : g.t === 'time' ? `조기진입은 ${HM(g.v)}까지만 허용` : `조기진입은 누적대금 ${g.v}억 이상만 허용` },
+  { key: 'early', title: '조기진입 조정', target: '큰 손절', sim: true,
+    grids: [[{ t: 'off' }],
+            ['0910', '0908', '0906'].map(v => ({ t: 'time', v })),
+            [20, 25, 30].map(v => ({ t: 'cum', v })),
+            [0.25, 0.30, 0.35].map(v => ({ t: 'macd', v }))],
+    label: g => g.t === 'off' ? '조기가속 진입 끄기 (재시뮬)' : g.t === 'time' ? `조기진입 시한 09:12→${HM(g.v)} (재시뮬)`
+      : g.t === 'cum' ? `조기진입 누적대금 15→${g.v}억 (재시뮬)` : `조기진입 MACD 0.20→${g.v.toFixed(2)} (재시뮬)` },
   { key: 'rise', title: '추격 상한', target: '큰 손절',
     grids: [[8, 10, 12, 14, 16, 18, 20, 22, 25]],
     label: v => `진입 시 전일종가 대비 +${v}% 넘으면 진입 안 함` },
@@ -34,6 +38,42 @@ const cfgText = cfg => {
   return t.length ? t.join(' + ') : '처방 없음 (원본 그대로)';
 };
 
+/* ───────── 조기가속 조건 변형 엔진 (app.js 파일은 그대로, 메모리 사본만 수정) ───────── */
+const EA0 = { on: true, t: '0912', cum: 15, macd: 0.20 };
+const EA = { ...EA0 };
+let FV = null;
+const FE = FAM.find(F => F.key === 'early');
+const eKey = g => JSON.stringify(g);
+const setEA = g => Object.assign(EA, EA0, !g ? {} : g.t === 'off' ? { on: false } : g.t === 'time' ? { t: g.v } : g.t === 'cum' ? { cum: g.v } : { macd: g.v });
+async function loadVariant() {
+  if (FV) return;
+  const response = await fetch('/static/app.js', { cache: 'no-store' });
+  if (!response.ok) throw new Error('app.js 로드 실패 HTTP ' + response.status);
+  const buf = await response.arrayBuffer();
+  const sha = [...new Uint8Array(await crypto.subtle.digest('SHA-256', buf))].map(b => b.toString(16).padStart(2, '0')).join('');
+  if (sha !== S.sha) throw new Error('app.js가 튜너 로드 이후 바뀌었습니다. Ctrl+F5 후 다시 실행하세요.');
+  const src = new TextDecoder('utf-8').decode(buf);
+  const re = /let\s+earlyAccelerationEnter\s*=\s*\(\s*isS4Setup\s*&&\s*bar\.time\s*<=\s*"0912"\s*&&\s*curCumAmtEok\s*>=\s*15\.0\s*&&\s*curNormMACD\s*>=\s*0\.20\s*\)\s*;/g;
+  const hits = [...src.matchAll(re)];
+  if (hits.length !== 2) throw new Error(`S4.3 조기가속 줄을 찾지 못했습니다 (일치 ${hits.length}건, 기대 2건: S4.2·S4.3)`);
+  const h = hits[1];   // 두 번째 = S4.3 (770행)
+  const src2 = src.slice(0, h.index)
+    + 'let earlyAccelerationEnter = (__EA.on && isS4Setup && bar.time <= __EA.t && curCumAmtEok >= __EA.cum && curNormMACD >= __EA.macd);'
+    + src.slice(h.index + h[0].length);
+  const m = src2.match(/\(\s*function\s*\(\s*\)\s*\{/), end = src2.lastIndexOf('})');
+  if (!m || end < 0) throw new Error('app.js 구조를 인식하지 못했습니다.');
+  const noop = () => {};
+  const fakeDoc = { getElementById: () => null, querySelector: () => null, querySelectorAll: () => [], addEventListener: noop, createElement: () => ({ style: {} }) };
+  const fakeWin = { addEventListener: noop, LightweightCharts: null, innerWidth: 1000, innerHeight: 800 };
+  FV = new Function('window', 'document', '__EA',
+    src2.slice(m.index + m[0].length, end) + '\n;return (typeof evaluateStrategyTrade === "function") ? evaluateStrategyTrade : null;')(fakeWin, fakeDoc, EA);
+  if (!FV) throw new Error('변형 엔진에서 evaluateStrategyTrade를 찾지 못했습니다.');
+}
+async function simRecs(g, tag) {
+  return buildRecs(L.P, L.days, tag, g);
+}
+const recsFor = cfg => cfg.early ? L.sims.get(eKey(cfg.early)) : L.recs0;
+
 /* ───────── 화면 ───────── */
 function buildUI() {
   const sec = $('t-lab'); if (!sec) return;
@@ -43,6 +83,7 @@ function buildUI() {
   <label>기준 <select id="lb-mode"><option value="real">S4.3 실전모드 (S4.3-R)</option><option value="gate">S4.3 1516 게이트 ON (참고)</option></select></label>
   <label>큰 손절: 순손익 ≤ <input type="number" id="lb-big" value="-3" step="0.5">%</label>
   <label>고MFE 저수익: 진입 후 최고 ≥ <input type="number" id="lb-mfe" value="5" step="0.5">% 인데 실현 &lt; 그 <input type="number" id="lb-ratio" value="30" step="5">%</label>
+  <label>훼손 허용: 개선액의 <input type="number" id="lb-dmg" value="50" step="10" style="width:52px">%</label>
  </div>
  <div class="row" style="margin-top:6px">
   <button class="act" id="lb-run">진단·탐색 실행</button>
@@ -61,18 +102,23 @@ function buildUI() {
 }
 
 /* ───────── 원본 판정 1회 + 진입 시점 특징 ───────── */
-async function build(P, days) {
+async function buildRecs(P, days, tag, variant = undefined) {
   const half = Math.ceil(days.length / 2), A = new Set(days.slice(0, half).map(d => d.key));
-  L.recs = []; L.dates = days.map(d => d.date);
-  const tot = days.reduce((s, d) => s + d.cases.length, 0);
+  const out = [], tot = days.reduce((s, d) => s + d.cases.length, 0);
   let k = 0;
   for (const d of days) for (const c of d.cases) {
-    const e = T.evalCase(d, c, P, 'capture', P.N0);
+    let e;
+    const F0 = S.F;
+    try {
+      if (variant !== undefined) { setEA(variant); S.F = FV; }
+      e = T.evalCase(d, c, P, 'capture', P.N0);
+    } finally { S.F = F0; setEA(null); }
     const rec = { d, c, o: e.o, half: A.has(d.key) ? 'A' : 'B', ok: false };
     if (e.o.entered && !e.o.open && e.o.idx >= 0 && e.o.entryPrice > 0) feat(rec, e);
-    L.recs.push(rec);
-    if (++k % 25 === 0) { $('lb-prog').textContent = `원본 S4.3 판정 ${k}/${tot}…`; await tick(); }
+    out.push(rec);
+    if (++k % 50 === 0) { $('lb-prog').textContent = `${tag} ${k}/${tot}…`; await tick(); }
   }
+  return out;
 }
 function feat(rec, e) {
   const { bars, r } = e, o = rec.o, i0 = o.idx, b0 = bars[i0], date = rec.d.date, ep = o.entryPrice;
@@ -101,9 +147,7 @@ function applyCfg(rec, cfg) {
   if (!o.entered) return { entered: false, why: '' };
   if (o.open || !rec.ok) return { entered: true, open: o.open, net: o.net, pnl: o.pnl, stop: o.stop, why: '' };
   const f = rec.f;
-  const g = cfg.early;
-  if (g && f.path === '조기' && (g.t === 'off' || (g.t === 'time' && f.time > g.v) || (g.t === 'cum' && f.cum < g.v)))
-    return { entered: false, why: `조기진입 차단 (${HM(f.time)}, 누적 ${f.cum.toFixed(0)}억)` };
+
   if (cfg.rise != null && f.rise != null && f.rise > cfg.rise)
     return { entered: false, why: `추격 차단 (전일 대비 +${f.rise.toFixed(1)}%)` };
   let res = { entered: true, open: false, net: o.net, pnl: o.pnl, stop: o.stop, why: '' };
@@ -138,21 +182,26 @@ function halves(res) {
   return { A, B };
 }
 function evaluate(cfg) {
-  const res = L.recs.map(r => applyCfg(r, cfg)), all = mets(res), h = halves(res);
-  let fixed = 0, broken = 0; const changes = [];
+  const recs = recsFor(cfg);
+  if (!recs) throw new Error('조기진입 재시뮬 결과가 없습니다: ' + eKey(cfg.early));
+  const res = recs.map(r => applyCfg(r, cfg)), all = mets(res), h = halves(res);
+  let fixed = 0, broken = 0, gain = 0, loss = 0, nN = 0, nE = 0; const changes = [];
   res.forEach((x, i) => {
-    const b = L.baseRes[i], bIn = b.entered && !b.open, xIn = x.entered && !x.open;
+    const xIn = x.entered && !x.open;
+    if (xIn && recs[i].ok) { if (recs[i].f.path === '조기') nE++; else nN++; }
+    const b = L.baseRes[i], bIn = b.entered && !b.open;
     if (!bIn && !xIn) return;
     const bn = bIn ? b.net : 0, nn = xIn ? x.net : 0, dd = nn - bn;
     if (Math.abs(dd) < 1e-6) return;
     const cl = L.cls[i];
-    if (dd > 0 && (cl === '큰손절' || cl === '고MFE저수익')) fixed++;
-    if (dd < 0 && bn > 0) broken++;
-    changes.push({ i, bn, nn, dd, bIn, xIn, why: x.why || '', cl });
+    if (dd > 0) { gain += dd; if (cl === '큰손절' || cl === '고MFE저수익') fixed++; }
+    else { loss += -dd; if (bn > 0) broken++; }
+    let why = x.why || '';
+    if (!why && recs !== L.recs) { const r = recs[i]; why = !xIn ? '재시뮬: 진입 없음' : r.ok ? `재시뮬: ${r.f.path}진입 ${HM(r.f.time)}` : '재시뮬 진입'; }
+    changes.push({ i, bn, nn, dd, bIn, xIn, why, cl });
   });
-  return { cfg, all, dA: h.A - L.bA, dB: h.B - L.bB, dAll: all.sum - L.bAll.sum, fixed, broken, changes };
+  return { cfg, all, dA: h.A - L.bA, dB: h.B - L.bB, dAll: all.sum - L.bAll.sum, fixed, broken, gain, loss, nN, nE, changes };
 }
-
 /* ───────── 탐색과 판정 ───────── */
 const dist = (a, b) => a.slice(1).reduce((s, v, i) => s + Math.abs(v - b[i + 1]), 0);
 function judge(p) {
@@ -160,11 +209,17 @@ function judge(p) {
   if (e.dA <= 0) why.push('앞 기간 악화');
   if (e.dB <= 0) why.push('뒤 기간 악화');
   if (e.fixed < 3) why.push(`고친 문제거래 ${e.fixed}건`);
-  if (e.broken > e.fixed / 3) why.push(`수익거래 훼손 ${e.broken}건`);
+  if (e.loss > e.gain * L.Q.dmg / 100) why.push(`훼손액 ${e.loss.toFixed(1)} > 개선액 ${e.gain.toFixed(1)}의 ${L.Q.dmg}%`);
   if (!p.stable) why.push('주변값에서 효과 사라짐');
   p.pass = why.length ? 0 : 1;
   p.verdict = e.dAll <= 0 ? '기각' : p.pass ? '추천' : '보류';
   p.why = e.dAll <= 0 ? '전체 순익 개선 없음' : p.pass ? '4개 조건 통과' : why.join(', ');
+}
+function neighbors(key, pts, p) {
+  const F = FAM.find(f => f.key === key);
+  if (key === 'early' && p.g.t === 'off')
+    return F.grids.slice(1).map((l, gi) => pts.find(q => q.pos[0] === gi + 1 && q.pos[1] === l.length - 1)).filter(Boolean);
+  return pts.filter(q => q.pos[0] === p.pos[0] && dist(p.pos, q.pos) === 1);
 }
 function search() {
   return FAM.map(F => {
@@ -173,27 +228,32 @@ function search() {
     else F.grids.forEach((list, gi) => list.forEach((g, j) => pts.push({ g, pos: [gi, j] })));
     pts.forEach(p => { p.label = F.label(p.g); p.ev = evaluate({ ...L.baseCfg, [F.key]: p.g }); });
     pts.forEach(p => {
-      p.stable = pts.filter(q => q.pos[0] === p.pos[0] && dist(p.pos, q.pos) === 1).every(q => q.ev.dAll > 0);
+      p.stable = neighbors(F.key, pts, p).every(q => q.ev.dAll > 0);
       judge(p);
     });
     pts.sort((x, y) => (y.pass - x.pass) || (y.ev.dAll - x.ev.dAll));
     return { key: F.key, title: F.title, target: F.target, best: pts[0], all: pts };
   });
 }
-function combo(cands) {
-  const ok = cands.filter(c => c.best.verdict === '추천').sort((a, b) => b.best.ev.dAll - a.best.ev.dAll);
-  if (ok.length < 2) return null;
-  let cfg = { ...L.baseCfg }, cur = null; const used = [];
-  for (const c of ok) {
-    const tryCfg = { ...cfg, [c.key]: c.best.g }, ev = evaluate(tryCfg);
-    if (!cur || (ev.dAll > cur.dAll && ev.dA > 0 && ev.dB > 0)) { cfg = tryCfg; cur = ev; used.push(c); }
+function stack(cands) {
+  const order = cands.filter(c => c.best.ev.dAll > 0).sort((a, b) => b.best.ev.dAll - a.best.ev.dAll);
+  if (order.length < 2) return null;
+  let cfg = { ...L.baseCfg }, cur = null, stable = true; const used = [];
+  for (const c of order) {
+    const pre = cur ? cur.dAll : 0; let best = null;
+    for (const p of c.all) {
+      const ev = evaluate({ ...cfg, [c.key]: p.g });
+      if (ev.dAll > pre && ev.dA > 0 && ev.dB > 0 && (!best || ev.dAll > best.ev.dAll)) best = { p, ev };
+    }
+    if (!best) continue;
+    const st = neighbors(c.key, c.all, best.p).every(q => evaluate({ ...cfg, [c.key]: q.g }).dAll > pre);
+    cfg = { ...cfg, [c.key]: best.p.g }; cur = best.ev; stable = stable && st; used.push({ c, p: best.p });
   }
   if (used.length < 2) return null;
-  const p = { g: null, ev: cur, stable: used.every(c => c.best.stable), label: used.map(c => c.best.label).join(' + ') };
+  const p = { g: null, ev: cur, stable, label: used.map(u => u.p.label).join(' + ') };
   judge(p);
-  return { key: 'combo', title: '조합', target: [...new Set(used.map(c => c.target))].join(' + '), best: p, all: [p] };
+  return { key: 'combo', title: '조합 (순차 누적)', target: [...new Set(used.map(u => u.c.target))].join(' + '), best: p, all: [p] };
 }
-
 /* ───────── 진단 요약 ───────── */
 const FEATS = [['rise', '진입 시 전일종가 대비 상승', '%'], ['cum', '진입까지 누적대금', '억'], ['spike', '진입 직전 급등봉', '%'],
   ['wick', '진입봉 윗꼬리', '%'], ['overLine', '기준선 위 진입 거리', '%'], ['tmin', '진입 시각(09:00 이후)', '분'], ['early', '조기진입 비율', '%']];
@@ -227,13 +287,13 @@ function renderSum() {
 /* ───────── 후보 표 · 거래별 변화 ───────── */
 function renderCands() {
   let h = `<p><b>처방 후보 · ${esc(L.baseName)} 대비</b> <span class="hint">행을 누르면 거래별 변화가 나옵니다.</span></p>
-  <table><tr><th class="l">처방</th><th class="l">대상</th><th class="l">내용 (가장 나은 값)</th><th>순익 변화</th><th>앞 / 뒤</th><th>거래 · 승률 · PF</th><th>고친 / 망친</th><th class="l">판정</th></tr>`;
+  <table><tr><th class="l">처방</th><th class="l">대상</th><th class="l">내용 (가장 나은 값)</th><th>순익 변화</th><th>앞 / 뒤</th><th>거래 · 승률 · PF</th><th>개선액 / 훼손액</th><th class="l">판정</th></tr>`;
   L.show.forEach((c, k) => {
     const p = c.best, e = p.ev, cl = p.verdict === '추천' ? 'ok' : p.verdict === '보류' ? 'warn' : 'bad';
     const good = c.all.filter(q => q.ev.dAll > 0).length;
     h += `<tr class="click" data-k="${k}"><td class="l">${esc(c.title)}</td><td class="l">${esc(c.target)}</td><td class="l">${esc(p.label)}</td>
-      <td>${fp(e.dAll)}</td><td>${fp(e.dA)} / ${fp(e.dB)}</td><td>${e.all.n} · ${e.all.win.toFixed(1)}% · ${f2(e.all.pf)}</td>
-      <td>${e.fixed} / ${e.broken}</td><td class="l"><b class="${cl}">${p.verdict}</b> <span class="mut">${esc(p.why)}${c.all.length > 1 ? ` · 시험 ${c.all.length}개 중 개선 ${good}개` : ''}</span></td></tr>`;
+      <td>${fp(e.dAll)}</td><td>${fp(e.dA)} / ${fp(e.dB)}</td><td>${e.all.n} (일반 ${e.nN}·조기 ${e.nE}) · ${e.all.win.toFixed(1)}% · ${f2(e.all.pf)}</td>
+      <td>+${e.gain.toFixed(1)} / −${e.loss.toFixed(1)}</td><td class="l"><b class="${cl}">${p.verdict}</b> <span class="mut">${esc(p.why)}${c.all.length > 1 ? ` · 시험 ${c.all.length}개 중 개선 ${good}개` : ''}</span></td></tr>`;
   });
   $('lb-cands').innerHTML = h + '</table>';
   $('lb-cands').querySelectorAll('tr.click').forEach(tr => tr.addEventListener('click', () => renderDetail(+tr.dataset.k)));
@@ -267,7 +327,9 @@ function freeze(c) {
     period: `${L.dates[0]}~${L.dates[L.dates.length - 1]}`, days: L.dates.length,
     common: { N0: L.P.N0, macd: L.P.macd, cumGate: L.P.cumGate, minCum: L.P.minCum, hardStop: L.P.hardStop, cost: L.P.cost, stop: '봉종가' },
     result: { n: e.all.n, sum: +e.all.sum.toFixed(2), win: +e.all.win.toFixed(1), pf: e.all.pf === Infinity ? null : +e.all.pf.toFixed(2),
-              vsParent: +e.dAll.toFixed(2), front: +e.dA.toFixed(2), back: +e.dB.toFixed(2), fixed: e.fixed, broken: e.broken },
+              vsParent: +e.dAll.toFixed(2), front: +e.dA.toFixed(2), back: +e.dB.toFixed(2), fixed: e.fixed, broken: e.broken,
+              gain: e.gain, loss: e.loss, normal: e.nN, early: e.nE },
+    criteria: { ...L.Q },
     createdAt: new Date().toISOString() };
   L.versions.push(v);
   localStorage.setItem('s4lab.versions', JSON.stringify(L.versions));
@@ -309,21 +371,38 @@ async function run() {
     if (!days.length) { $('lb-prog').textContent = '데이터 탭에서 사용할 날짜를 선택하세요.'; return; }
     const key = JSON.stringify([mode, P.N0, P.macd, P.cumGate, P.minCum, P.hardStop, P.cost, P.K, days.map(d => [d.key, d.cases.length])]);
     L.P = P;
-    if (key !== L.key) { await build(P, days); L.key = key; }
+    if (key !== L.key) {
+      L.days = days; L.dates = days.map(d => d.date); L.sims = new Map(); L.vOK = false;
+      L.recs0 = await buildRecs(P, days, '원본 S4.3 판정');
+      L.key = key;
+    }
+    await loadVariant();
+    if (!L.vOK) {
+      const chk = await simRecs(null, '변형 엔진 검사');
+      const bad = chk.filter((r, i) => { const a = r.o, b = L.recs0[i].o;
+        return a.entered !== b.entered || a.open !== b.open || a.idx !== b.idx || Math.abs((a.net || 0) - (b.net || 0)) > 1e-9; }).length;
+      if (bad) throw new Error(`변형 엔진 검사 실패: 원래 조건(09:12·15억·0.20)인데 원본과 다른 거래 ${bad}건`);
+      L.vOK = true;
+    }
+    const need = FE.grids.flat(); if (L.baseCfg.early) need.push(L.baseCfg.early);
+    for (const g of need) if (!L.sims.has(eKey(g))) L.sims.set(eKey(g), await simRecs(g, '재시뮬 · ' + FE.label(g)));
     if (L.mode !== mode && !Object.keys(L.baseCfg).length) L.baseName = '';
     L.mode = mode;
-    L.Q = { big: parseFloat($('lb-big').value) || -3, mfe: parseFloat($('lb-mfe').value) || 5, ratio: parseFloat($('lb-ratio').value) || 30 };
+    L.Q = { big: parseFloat($('lb-big').value) || -3, mfe: parseFloat($('lb-mfe').value) || 5,
+            ratio: parseFloat($('lb-ratio').value) || 30, dmg: Number.isFinite(parseFloat($('lb-dmg').value)) ? Math.max(0, parseFloat($('lb-dmg').value)) : 50 };
     if (!L.baseName) L.baseName = mode === 'real' ? 'S4.3-R' : 'S4.3(게이트ON)';
+    L.recs = recsFor(L.baseCfg);
     L.baseRes = L.recs.map(r => applyCfg(r, L.baseCfg));
     L.cls = L.recs.map((r, i) => classify(r, L.baseRes[i]));
-    L.bAll = mets(L.baseRes); const h = halves(L.baseRes); L.bA = h.A; L.bB = h.B;
+    L.bAll = mets(L.baseRes);
+    const h = halves(L.baseRes); L.bA = h.A; L.bB = h.B;
     renderSum();
     $('lb-prog').textContent = '처방 탐색 중…'; await tick();
-    const cands = search(), cb = combo(cands);
+    const cands = search(), cb = stack(cands);
     L.show = cb ? cands.concat(cb) : cands;
     renderCands();
     $('lb-detail').innerHTML = '';
-    $('lb-prog').textContent = `완료 · 처방 값 ${cands.reduce((s, c) => s + c.all.length, 0)}개 시험`;
+    $('lb-prog').textContent = `완료 · 변형엔진 검사 ✓ · 조기진입 재시뮬 ${L.sims.size}종 · 처방 값 ${cands.reduce((s, c) => s + c.all.length, 0)}개 시험`;
   } catch (err) {
     console.error(err);
     $('lb-prog').innerHTML = `<span class="bad">오류: ${esc(err.message)}</span>`;
