@@ -1,7 +1,7 @@
 /* static/improve_lab.js — S4.3 개선 Lab (6번 탭)
-   1) 원본 app.js 파일은 보존한다. 원본 및 조기가속 변형 판정은 tuner.js의 evalCase를 사용한다.
-   2) 조기진입은 메모리 사본으로 재시뮬레이션한다. 추격 상한은 해당 결과의 진입을 막는다.
-   3) 청산 처방은 원본의 첫 익절·청산 이전 봉에서만, 봉종가로 판정한다.
+   1) 원본 app.js 파일은 보존한다. 변형 판정은 메모리 사본 엔진으로 재시뮬레이션한다.
+   2) 재시뮬 처방: 조기진입 조건 · 하드스탑 · 추격 상한(봉 단위 진입 금지) · 이익보호 트레일(첫 익절 전, 봉종가).
+   3) 변형 코드는 __X가 비어 있으면 원본과 똑같이 동작하며, 실행 때마다 원본 일치 검사를 한다.
    4) 처방은 옵션 조합(cfg)이고, 박제 버전은 그 cfg를 저장한 것이다. */
 (function () {
 'use strict';
@@ -16,6 +16,7 @@ const sumOf = (a, k) => a.reduce((s, x) => s + x[k], 0);
 const loadVersions = () => { try { const v = JSON.parse(localStorage.getItem('s4lab.versions') || '[]'); return Array.isArray(v) ? v : []; } catch (_) { return []; } };
 const L = { busy: false, key: '', recs: [], dates: [], P: null, mode: 'real', baseCfg: {}, baseName: '', show: [],
             versions: loadVersions() };
+const LAB_VER = 'lab-resim-3';
 
 /* ───────── 처방 목록 (대상 문제별 옵션과 시험 범위) ───────── */
 const FAM = [
@@ -29,21 +30,22 @@ const FAM = [
   { key: 'hs', title: '하드스탑', target: '큰 손절', sim: true,
     grids: [[-2.0, -2.5, -3.0, -3.5, -4.0]],
     label: v => `하드스탑 ${Number(L.P ? L.P.hardStop : T.params().hardStop)}% → ${v}% (재시뮬)` },
-  { key: 'rise', title: '추격 상한', target: '큰 손절',
-    grids: [[8, 10, 12, 14, 16, 18, 20, 22, 25]],
-    label: v => `진입 시 전일종가 대비 +${v}% 넘으면 진입 안 함` },
-  { key: 'trail', title: '이익보호 트레일', target: '고MFE 저수익',
-    grid2: { a: [3, 4, 5, 6, 8], b: [1.5, 2, 3, 4] },
-    label: g => `+${g.a}% 도달 후 최고가 대비 -${g.b}% 아래 종가면 청산` }
+  { key: 'rise', title: '추격 상한', target: '큰 손절', sim: true,
+    grids: [[14, 16, 18, 20, 22, 25]],
+    label: v => `전일종가 대비 +${v}% 넘는 봉에서는 진입 안 함 (재시뮬)` },
+  { key: 'trail', title: '이익보호 트레일', target: '고MFE 저수익', sim: true,
+    grid2: { a: [4, 5, 6, 8], b: [1, 1.5, 2, 3] },
+    label: g => `+${g.a}% 도달 후 최고가 대비 -${g.b}% 아래 종가면 청산 (재시뮬)` }
 ];
 const cfgText = cfg => {
   const t = FAM.filter(F => cfg[F.key] != null).map(F => F.label(cfg[F.key]));
   return t.length ? t.join(' + ') : '처방 없음 (원본 그대로)';
 };
 
-/* ───────── 조기가속 조건 변형 엔진 (app.js 파일은 그대로, 메모리 사본만 수정) ───────── */
+/* ───────── 변형 엔진 (app.js 파일은 그대로, 메모리 사본의 S4.3 블록만 수정) ───────── */
 const EA0 = { on: true, t: '0912', cum: 15, macd: 0.20 };
 const EA = { ...EA0 };
+const X = { rise: null, trail: null, prev: 0 };   // null이면 원본과 동일하게 동작
 let FV = null;
 const eaOf = g => Object.assign({}, EA0, !g ? {} : g.t === 'off' ? { on: false } : g.t === 'time' ? { t: g.v } : g.t === 'cum' ? { cum: g.v } : { macd: g.v });
 const setEA = g => Object.assign(EA, eaOf(g));
@@ -58,25 +60,52 @@ async function loadVariant() {
   const re = /let\s+earlyAccelerationEnter\s*=\s*\(\s*isS4Setup\s*&&\s*bar\.time\s*<=\s*"0912"\s*&&\s*curCumAmtEok\s*>=\s*15\.0\s*&&\s*curNormMACD\s*>=\s*0\.20\s*\)\s*;/g;
   const hits = [...src.matchAll(re)];
   if (hits.length !== 2) throw new Error(`S4.3 조기가속 줄을 찾지 못했습니다 (일치 ${hits.length}건, 기대 2건: S4.2·S4.3)`);
-  const h = hits[1];   // 두 번째 = S4.3 (770행)
-  const src2 = src.slice(0, h.index)
-    + 'let earlyAccelerationEnter = (__EA.on && isS4Setup && bar.time <= __EA.t && curCumAmtEok >= __EA.cum && curNormMACD >= __EA.macd);'
-    + src.slice(h.index + h[0].length);
+  const h = hits[1];   // 두 번째 = S4.3
+  const tail = src.slice(h.index);
+  // 주입 전 이름 검사: 이름이 다르면 계산이 조용히 틀어지므로 중단
+  const nm = [...src.slice(0, h.index).matchAll(/\b(let|const|var)\s+normalEnter\b/g)].pop();
+  if (!nm || nm[1] !== 'let') throw new Error('주입 불가: S4.3 normalEnter 선언(let)을 찾지 못했습니다.');
+  const evaluatorStart = src.indexOf('function evaluateStrategyTrade');
+  const setup = src.slice(evaluatorStart, h.index);
+  if (!/const\s+markers\s*=\s*\[\s*\]/.test(setup)) throw new Error('주입 불가: markers 선언을 찾지 못했습니다.');
+  for (const v of ['exitPrice', 'exitReason', 'pnlPct'])
+    if (!new RegExp('\\b' + v + '\\s*=').test(tail)) throw new Error(`주입 불가: S4.3 청산부에서 ${v} 변수를 찾지 못했습니다.`);
+  if (!/\bs43_stg1\b/.test(tail) || !/\bs43_stg2\b/.test(tail)) throw new Error('주입 불가: s43_stg1 / s43_stg2를 찾지 못했습니다.');
+  // (가) 추격 상한: 진입 판정 봉의 종가가 전일종가 대비 상한을 넘으면 그 봉만 진입 금지
+  const EARLY = 'let earlyAccelerationEnter = (__EA.on && isS4Setup && bar.time <= __EA.t && curCumAmtEok >= __EA.cum && curNormMACD >= __EA.macd);'
+    + ' if (__X.rise != null && __X.prev > 0 && (bar.close / __X.prev - 1) * 100 > __X.rise) { normalEnter = false; earlyAccelerationEnter = false; }';
+  let src2 = src.slice(0, h.index) + EARLY + src.slice(h.index + h[0].length);
+  // (나) 트레일: S4.3 청산부 curPnL 줄 바로 뒤, 첫 익절 전까지만 봉종가로 판정
+  const reP = /const\s+curPnL\s*=\s*\(\(bar\.close\s*-\s*entryPrice\)\s*\/\s*entryPrice\)\s*\*\s*100\.0\s*;/g;
+  reP.lastIndex = h.index + EARLY.length;
+  const pm = reP.exec(src2);
+  if (!pm) throw new Error('주입 불가: S4.3 청산부 curPnL 줄을 찾지 못했습니다.');
+  const TRAIL = ' if (__X.trail) { __trHi = Math.max(__trHi, +bar.high);'
+    + ' if (!s43_stg1 && !s43_stg2 && __trHi >= entryPrice * (1 + __X.trail.a / 100) && bar.close <= __trHi * (1 - __X.trail.b / 100)) {'
+    + ' exitPrice = bar.close; exitReason = "이익보호트레일"; pnlPct = curPnL;'
+    + ' markers.push({ time: bar.timestamp, position: "aboveBar", color: "#22d3ee", shape: "arrowDown", text: "[이익보호트레일] " + exitPrice.toLocaleString() + "원 (" + curPnL.toFixed(2) + "%)" }); break; } }';
+  const at = pm.index + pm[0].length;
+  src2 = src2.slice(0, at) + TRAIL + src2.slice(at);
+  const hv = src2.slice(evaluatorStart, h.index).match(/let\s+s43_highestPrice\s*=\s*0\s*;/);
+  if (!hv) throw new Error('주입 불가: s43_highestPrice 선언을 찾지 못했습니다.');
+  const hvAt = evaluatorStart + hv.index + hv[0].length;
+  src2 = src2.slice(0, hvAt) + ' let __trHi = 0;' + src2.slice(hvAt);
+
   const m = src2.match(/\(\s*function\s*\(\s*\)\s*\{/), end = src2.lastIndexOf('})');
   if (!m || end < 0) throw new Error('app.js 구조를 인식하지 못했습니다.');
   const noop = () => {};
   const fakeDoc = { getElementById: () => null, querySelector: () => null, querySelectorAll: () => [], addEventListener: noop, createElement: () => ({ style: {} }) };
   const fakeWin = { addEventListener: noop, LightweightCharts: null, innerWidth: 1000, innerHeight: 800 };
-  FV = new Function('window', 'document', '__EA',
-    src2.slice(m.index + m[0].length, end) + '\n;return (typeof evaluateStrategyTrade === "function") ? evaluateStrategyTrade : null;')(fakeWin, fakeDoc, EA);
+  FV = new Function('window', 'document', '__EA', '__X',
+    '"use strict";\n' + src2.slice(m.index + m[0].length, end) + '\n;return (typeof evaluateStrategyTrade === "function") ? evaluateStrategyTrade : null;')(fakeWin, fakeDoc, EA, X);
   if (!FV) throw new Error('변형 엔진에서 evaluateStrategyTrade를 찾지 못했습니다.');
 }
-const simKey = cfg => JSON.stringify([cfg.early || null, cfg.hs ?? null]);
-const needSim = cfg => !!cfg.early || cfg.hs != null;
+const SIMK = ['early', 'hs', 'rise', 'trail'];
+const simKey = cfg => JSON.stringify(SIMK.map(k => cfg[k] ?? null));
+const needSim = cfg => SIMK.some(k => cfg[k] != null);
 async function simRecs(cfg, tag) {
   const P = cfg.hs != null ? { ...L.P, hardStop: cfg.hs } : L.P;
-  // Keep each engine substitution synchronous so other tabs always see the original engine.
-  return buildRecs(P, L.days, tag, cfg.early || null);
+  return buildRecs(P, L.days, tag, cfg.early || null, { rise: cfg.rise ?? null, trail: cfg.trail || null });
 }
 async function ensureSim(cfg) {
   if (!needSim(cfg) || L.sims.has(simKey(cfg))) return;
@@ -89,7 +118,7 @@ const recsFor = cfg => needSim(cfg) ? L.sims.get(simKey(cfg)) : L.recs0;
 function buildUI() {
   const sec = $('t-lab'); if (!sec) return;
   sec.innerHTML = `
-<fieldset><legend>기준 버전과 문제 거래 기준</legend>
+<fieldset><legend>기준 버전과 문제 거래 기준 <span class="mut">(${LAB_VER})</span></legend>
  <div class="row">
   <label>기준 <select id="lb-mode"><option value="real">S4.3 실전모드 (S4.3-R)</option><option value="gate">S4.3 1516 게이트 ON (참고)</option></select></label>
   <label>큰 손절: 순손익 ≤ <input type="number" id="lb-big" value="-3" step="0.5">%</label>
@@ -101,7 +130,7 @@ function buildUI() {
   <button class="sub" id="lb-reset">기준을 S4.3로 되돌리기</button>
   <span id="lb-prog" class="hint"></span>
  </div>
- <div class="hint">MACD·누적대금·하드스탑·비용은 2 실험 탭 설정을 그대로 씁니다. 손절은 봉종가 기준입니다. 현재 기준 처방: <b id="lb-basecfg">없음</b></div>
+ <div class="hint">MACD·누적대금·하드스탑·비용은 2 실험 탭 설정을 그대로 씁니다. 손절은 봉종가 기준입니다. 모든 처방은 원본 엔진 재시뮬입니다. 현재 기준 처방: <b id="lb-basecfg">없음</b></div>
 </fieldset>
 <div id="lb-sum"></div>
 <div id="lb-cands"></div>
@@ -112,8 +141,8 @@ function buildUI() {
   renderVers();
 }
 
-/* ───────── 원본 판정 1회 + 진입 시점 특징 ───────── */
-async function buildRecs(P, days, tag, variant = undefined) {
+/* ───────── 판정 + 진입 시점 특징 ───────── */
+async function buildRecs(P, days, tag, variant = undefined, x = null) {
   const half = Math.ceil(days.length / 2), A = new Set(days.slice(0, half).map(d => d.key));
   const out = [], tot = days.reduce((s, d) => s + d.cases.length, 0);
   let k = 0;
@@ -121,9 +150,12 @@ async function buildRecs(P, days, tag, variant = undefined) {
     let e;
     const F0 = S.F;
     try {
-      if (variant !== undefined) { setEA(variant); S.F = FV; }
+      if (variant !== undefined) {
+        setEA(variant); X.rise = x ? x.rise : null; X.trail = x ? x.trail : null; X.prev = +c._prev || 0;
+        S.F = FV;
+      }
       e = T.evalCase(d, c, P, 'capture', P.N0);
-    } finally { S.F = F0; setEA(null); }
+    } finally { S.F = F0; setEA(null); X.rise = null; X.trail = null; X.prev = 0; }
     const rec = { d, c, o: e.o, half: A.has(d.key) ? 'A' : 'B', ok: false, mk: (e.r && e.r.markers) || [], basePrice: e.r && e.r.basePrice };
     if (e.o.entered && !e.o.open && e.o.idx >= 0 && e.o.entryPrice > 0) feat(rec, e);
     out.push(rec);
@@ -136,7 +168,6 @@ function feat(rec, e) {
   const mk = (r && r.markers) || [];
   const downs = mk.filter(m => m.shape === 'arrowDown');
   const exitTs = downs.length ? downs[downs.length - 1].time : Infinity;
-  const tp = mk.find(m => /익절/.test(m.text || ''));
   let hi = -Infinity, cum = 0;
   for (let i = i0 + 1; i < bars.length && bars[i].date === date && bars[i].timestamp <= exitTs; i++) hi = Math.max(hi, +bars[i].high);
   for (let i = 0; i <= i0; i++) { const b = bars[i]; if (b.date === date && b.time >= '0900') cum += (+b.close) * (+b.volume || 0); }
@@ -149,32 +180,14 @@ function feat(rec, e) {
     overLine: r && r.basePrice > 0 ? (ep / r.basePrice - 1) * 100 : null,
     mfe: Number.isFinite(hi) ? Math.max(0, (hi / ep - 1) * 100) : 0
   };
-  rec.bars = bars; rec.i0 = i0; rec.limTs = Math.min(exitTs, tp ? tp.time : Infinity); rec.ok = true;
+  rec.ok = true;
 }
 
-/* ───────── 처방 적용 ───────── */
+/* ───────── 처방 적용 (모든 처방이 재시뮬이므로 엔진 결과 그대로) ───────── */
 function applyCfg(rec, cfg) {
-  const o = rec.o, cost = L.P.cost;
+  const o = rec.o;
   if (!o.entered) return { entered: false, why: '' };
-  if (o.open || !rec.ok) return { entered: true, open: o.open, net: o.net, pnl: o.pnl, stop: o.stop, why: '' };
-  const f = rec.f;
-
-  if (cfg.rise != null && f.rise != null && f.rise > cfg.rise)
-    return { entered: false, why: `추격 차단 (전일 대비 +${f.rise.toFixed(1)}%)` };
-  let res = { entered: true, open: false, net: o.net, pnl: o.pnl, stop: o.stop, why: '' };
-  if (cfg.trail) {
-    const { a, b } = cfg.trail, ep = o.entryPrice, bars = rec.bars, date = rec.d.date;
-    let hi = -Infinity;
-    for (let i = rec.i0 + 1; i < bars.length && bars[i].date === date && bars[i].timestamp < rec.limTs; i++) {
-      hi = Math.max(hi, +bars[i].high);
-      if (hi >= ep * (1 + a / 100) && +bars[i].close <= hi * (1 - b / 100)) {
-        const pnl = (+bars[i].close / ep - 1) * 100;
-        res = { entered: true, open: false, pnl, net: pnl - cost, stop: false, why: `이익보호 청산 ${HM(bars[i].time)}`, exitTimestamp: bars[i].timestamp, exitPrice: +bars[i].close };
-        break;
-      }
-    }
-  }
-  return res;
+  return { entered: true, open: o.open, net: o.net, pnl: o.pnl, stop: o.stop, why: '' };
 }
 function classify(rec, x) {
   if (!x.entered || x.open) return '';
@@ -208,7 +221,11 @@ function evaluate(cfg) {
     if (dd > 0) { gain += dd; if (cl === '큰손절' || cl === '고MFE저수익') fixed++; }
     else { loss += -dd; if (bn > 0) broken++; }
     let why = x.why || '';
-    if (!why && recs !== L.recs) { const r = recs[i]; why = !xIn ? '재시뮬: 진입 없음' : r.ok ? `재시뮬: ${r.f.path}진입 ${HM(r.f.time)}` : '재시뮬 진입'; }
+    if (!why && recs !== L.recs) {
+      const r = recs[i], ex = (r.mk || []).filter(m => m.shape === 'arrowDown').pop();
+      const exT = ex ? ((ex.text || '').match(/\[(.+?)\]/) || [])[1] : '';
+      why = !xIn ? '재시뮬: 진입 없음' : (r.ok ? `재시뮬: ${r.f.path}진입 ${HM(r.f.time)}` : '재시뮬 진입') + (exT ? ` → ${exT}` : '');
+    }
     changes.push({ i, bn, nn, dd, bIn, xIn, why, cl });
   });
   return { cfg, all, dA: h.A - L.bA, dB: h.B - L.bB, dAll: all.sum - L.bAll.sum, fixed, broken, gain, loss, nN, nE, changes };
@@ -232,23 +249,25 @@ function neighbors(key, pts, p) {
     return F.grids.slice(1).map((l, gi) => pts.find(q => q.pos[0] === gi + 1 && q.pos[1] === l.length - 1)).filter(Boolean);
   return pts.filter(q => q.pos[0] === p.pos[0] && dist(p.pos, q.pos) === 1);
 }
+const sameG = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 async function search() {
-  const out = [], cur = L.baseCfg.hs ?? Number(L.P.hardStop);
+  const out = [], curHs = L.baseCfg.hs ?? Number(L.P.hardStop);
   for (const F of FAM) {
     const pts = [];
     if (F.grid2) F.grid2.a.forEach((a, ia) => F.grid2.b.forEach((b, ib) => pts.push({ g: { a, b }, pos: [0, ia, ib] })));
-    else F.grids.forEach((list, gi) => list.forEach((g, j) => {
-      if (F.key === 'hs' && Math.abs(g - cur) < 1e-9) return;
-      pts.push({ g, pos: [gi, j] });
-    }));
-    for (const p of pts) {
+    else F.grids.forEach((list, gi) => list.forEach((g, j) => pts.push({ g, pos: [gi, j] })));
+    // 현재 기준과 같은 값은 비교 의미가 없으므로 제외
+    const cur = F.key === 'hs' ? curHs : L.baseCfg[F.key];
+    const live = pts.filter(p => !(cur != null && (F.key === 'hs' ? Math.abs(p.g - cur) < 1e-9 : sameG(p.g, cur))));
+    for (const p of live) {
       const cfg = { ...L.baseCfg, [F.key]: p.g };
       await ensureSim(cfg);
       p.label = F.label(p.g); p.ev = evaluate(cfg);
     }
-    pts.forEach(p => { p.stable = neighbors(F.key, pts, p).every(q => q.ev.dAll > 0); judge(p); });
-    pts.sort((x, y) => (y.pass - x.pass) || (y.ev.dAll - x.ev.dAll));
-    out.push({ key: F.key, title: F.title, target: F.target, best: pts[0], all: pts });
+    if (!live.length) continue;
+    live.forEach(p => { p.stable = neighbors(F.key, live, p).every(q => q.ev.dAll > 0); judge(p); });
+    live.sort((x, y) => (y.pass - x.pass) || (y.ev.dAll - x.ev.dAll));
+    out.push({ key: F.key, title: F.title, target: F.target, best: live[0], all: live });
   }
   return out;
 }
@@ -348,7 +367,7 @@ function renderDetail(k) {
 /* ───────── 박제 · 반복 ───────── */
 function freeze(c) {
   const p = c.best, e = p.ev, id = `S4.3-L${L.versions.length + 1}`;
-  const v = { id, parent: L.baseName, cfg: e.cfg, text: cfgText(e.cfg), verdict: p.verdict, why: p.why, mode: L.mode, sha: S.sha,
+  const v = { id, parent: L.baseName, cfg: e.cfg, text: cfgText(e.cfg), verdict: p.verdict, why: p.why, mode: L.mode, sha: S.sha, lab: LAB_VER,
     period: `${L.dates[0]}~${L.dates[L.dates.length - 1]}`, days: L.dates.length,
     common: { N0: L.P.N0, macd: L.P.macd, cumGate: L.P.cumGate, minCum: L.P.minCum, hardStop: L.P.hardStop, cost: L.P.cost, stop: '봉종가' },
     result: { n: e.all.n, sum: +e.all.sum.toFixed(2), win: +e.all.win.toFixed(1), pf: e.all.pf === Infinity ? null : +e.all.pf.toFixed(2),
@@ -374,9 +393,10 @@ function again(c) {
 function renderVers() {
   const el = $('lb-vers'); if (!el) return;
   if (!L.versions.length) { el.innerHTML = '<span class="hint">아직 박제한 버전이 없습니다.</span>'; return; }
-  el.innerHTML = `<table><tr><th class="l">버전</th><th class="l">기준</th><th class="l">처방</th><th>거래</th><th>순익</th><th>기준 대비</th><th class="l">기간</th><th class="l">판정</th><th></th></tr>` +
+  el.innerHTML = `<table><tr><th class="l">버전</th><th class="l">기준</th><th class="l">처방</th><th>거래</th><th>순익</th><th>기준 대비</th><th class="l">기간</th><th class="l">판정</th><th class="l">계산</th><th></th></tr>` +
     L.versions.map((v, i) => `<tr><td class="l">${esc(v.id)}</td><td class="l">${esc(v.parent)}</td><td class="l">${esc(v.text)}</td><td>${v.result.n}</td>
       <td>${fp(v.result.sum)}</td><td>${fp(v.result.vsParent)}</td><td class="l">${esc(v.period)}</td><td class="l">${esc(v.verdict)}</td>
+      <td class="l">${v.lab ? '재시뮬' : '<span class="mut">근사 포함</span>'}</td>
       <td><button class="sub" data-v="${i}">기준으로</button></td></tr>`).join('') + '</table>';
   el.querySelectorAll('button[data-v]').forEach(b => b.addEventListener('click', () => {
     const v = L.versions[+b.dataset.v];
@@ -406,7 +426,7 @@ async function run() {
       const chk = await simRecs({}, '변형 엔진 검사');
       const bad = chk.filter((r, i) => { const a = r.o, b = L.recs0[i].o;
         return a.entered !== b.entered || a.open !== b.open || a.idx !== b.idx || Math.abs((a.net || 0) - (b.net || 0)) > 1e-9; }).length;
-      if (bad) throw new Error(`변형 엔진 검사 실패: 원래 조건(09:12·15억·0.20)인데 원본과 다른 거래 ${bad}건`);
+      if (bad) throw new Error(`변형 엔진 검사 실패: 처방 없이 원본과 다른 거래 ${bad}건`);
       L.vOK = true;
     }
     await ensureSim(L.baseCfg);
@@ -426,7 +446,7 @@ async function run() {
     L.show = cb ? cands.concat(cb) : cands;
     renderCands();
     $('lb-detail').innerHTML = '';
-    $('lb-prog').textContent = `완료 · 변형엔진 검사 ✓ · 재시뮬 ${L.sims.size}종 · 처방 값 ${cands.reduce((s, c) => s + c.all.length, 0)}개 시험`;
+    $('lb-prog').textContent = `완료 (${LAB_VER}) · 변형엔진 검사 ✓ · 재시뮬 ${L.sims.size}종 · 처방 값 ${cands.reduce((s, c) => s + c.all.length, 0)}개 시험`;
   } catch (err) {
     console.error(err);
     $('lb-prog').innerHTML = `<span class="bad">오류: ${esc(err.message)}</span>`;

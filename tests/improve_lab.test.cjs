@@ -52,7 +52,7 @@ test('Lab is connected after tuner and remains gated by reproduction check', () 
   const html = read('static/tuner.html');
   assert.match(html, /<button data-t="lab" disabled>6 개선Lab<\/button>/);
   assert.ok(html.indexOf('id="t-lab"') < html.indexOf('src="/static/tuner.js"'));
-  assert.ok(html.indexOf('src="/static/tuner.js"') < html.indexOf('src="/static/improve_lab.js"'));
+  assert.ok(html.indexOf('src="/static/tuner.js"') < html.indexOf('src="/static/improve_lab.js?v=lab-resim-3"'));
   assert.match(read('static/tuner.js'), /openChart\(dkey, code, chartParams = null\)/);
 });
 
@@ -63,14 +63,14 @@ test('real data: baseline, all prescription grids, drilldown, freeze, repeat and
   assert.equal(L.P.stopMode, 'close');
   assert.equal(L.vOK, true);
   assert.ok(L.sims.size >= 14);
-  const off = L.sims.get(JSON.stringify([{ t: 'off' }, null]));
+  const off = L.sims.get(JSON.stringify([{ t: 'off' }, null, null, null]));
   assert.ok(off.some((r, i) => r.o.entered && r.o.idx !== L.recs0[i].o.idx), 'disabling early entry must resimulate later entries');
   const early = L.show.find(c => c.key === 'early');
   const neighbors = h.lab.neighbors('early', early.all, early.all.find(p => p.g.t === 'off'));
   assert.deepEqual(Array.from(neighbors, p => p.g.v), ['0906', 30, .35]);
   assert.equal(L.bAll.n, 230);
   assert.equal(L.bAll.sum.toFixed(2), '-16.88');
-  assert.deepEqual(Array.from(L.show.slice(0, 4), c => c.all.length), [10, 4, 9, 20]);
+  assert.deepEqual(Array.from(L.show.slice(0, 4), c => c.all.length), [10, 4, 6, 16]);
   assert.match(h.node('lb-sum').innerHTML, /큰 손절/);
   assert.match(h.node('lb-cands').innerHTML, /처방 후보/);
   const hs = L.show.find(c => c.key === 'hs');
@@ -90,6 +90,8 @@ test('real data: baseline, all prescription grids, drilldown, freeze, repeat and
   h.node('lb-freeze').events.click();
   assert.equal(h.downloads[0].download, 'S4.3-L1.json');
   const frozen = JSON.parse(h.saved.get('s4lab.versions'))[0];
+  assert.equal(frozen.lab, 'lab-resim-3');
+  assert.match(h.node('t-lab').innerHTML, /lab-resim-3/);
   assert.equal(frozen.mode, 'real'); assert.equal(frozen.common.stop, '봉종가');
   assert.equal(frozen.sha, h.T.S.sha);
   const originalEngine = h.T.S.F;
@@ -106,16 +108,11 @@ test('real data: baseline, all prescription grids, drilldown, freeze, repeat and
   assert.equal(h.alerts.length, 0);
 });
 
-test('entry filters and trailing respect entry features and first-exit cutoff', () => {
-  const h = harness(); h.lab.L.P = { cost: .25 };
-  const r = { o: { entered: true, open: false, entryPrice: 100, net: -3.25, pnl: -3, stop: true }, ok: true,
-    f: { path: '조기', time: '0909', cum: 25, rise: 13 }, i0: 0, limTs: 3, d: { date: '20260930' },
-    bars: [{ timestamp: 1, date: '20260930', high: 110, close: 90 }, { timestamp: 2, date: '20260930', time: '0910', high: 106, close: 103 }, { timestamp: 3, date: '20260930', high: 110, close: 97 }] };
-  for (const cfg of [{ rise: 12 }]) assert.equal(h.lab.applyCfg(r, cfg).entered, false);
-  const out = h.lab.applyCfg(r, { trail: { a: 5, b: 2 } });
-  assert.ok(Math.abs(out.net - 2.75) < 1e-9);
-  assert.match(out.why, /이익보호 청산/);
-  r.limTs = 2; assert.equal(h.lab.applyCfg(r, { trail: { a: 5, b: 2 } }).net, -3.25);
+test('applyCfg exposes simulated outcomes without blocking or repricing them again', () => {
+  const h = harness();
+  const r = { o: { entered: true, open: false, net: 2.75, pnl: 3, stop: false } };
+  const result = h.lab.applyCfg(r, { rise: 0, trail: { a: 1, b: 1 } });
+  assert.equal(result.entered, true); assert.equal(result.net, 2.75);
 });
 
 test('empty days and damaged storage do not crash or leave the run button locked', async () => {
@@ -177,14 +174,29 @@ test('hard-stop reruns match the original engine, joint variants are isolated an
     const direct = evalCase(r.d, r.c, { ...L.P, hardStop: -2.5 }, 'capture', L.P.N0);
     assert.deepEqual(r.o, direct.o);
   }
-  await h.lab.ensureSim({ ...cfg, rise: 12, trail: { a: 5, b: 2 } });
-  assert.equal(calls, firstCalls);
+  const fullCfg = { ...cfg, rise: 16, trail: { a: 5, b: 2 } };
+  await h.lab.ensureSim(fullCfg);
+  assert.equal(calls, firstCalls * 2);
+  await h.lab.ensureSim(fullCfg);
+  assert.equal(calls, firstCalls * 2);
+  assert.notEqual(h.lab.recsFor(fullCfg), recs);
+  const full = h.lab.recsFor(fullCfg);
+  assert.ok(full.filter(r => r.ok && r.f.rise != null).every(r => r.f.rise <= fullCfg.rise + 1e-9));
+  const trailed = full.filter(r => r.o.reason === '이익보호트레일');
+  assert.ok(trailed.length > 0, 'engine must produce actual trailing-exit markers');
+  for (const r of trailed) {
+    const exit = r.mk.find(m => /이익보호트레일/.test(m.text || ''));
+    assert.ok(exit);
+    assert.ok(!r.mk.some(m => /익절/.test(m.text || '') && m.time < exit.time));
+    const entry = r.mk.find(m => m.position === 'belowBar');
+    assert.ok(exit.time > entry.time, 'entry-bar high must not trigger an exit');
+  }
   assert.equal(h.lab.recsFor(cfg), recs);
   const combined = { early: { t: 'macd', v: .3 }, hs: -2.5 };
   await h.lab.ensureSim(combined);
-  assert.equal(calls, firstCalls * 2);
+  assert.equal(calls, firstCalls * 3);
   assert.notEqual(h.lab.recsFor(combined), recs);
   assert.ok(h.lab.recsFor(combined).some((r, i) => r.o.idx !== recs[i].o.idx));
-  await h.lab.ensureSim(combined); assert.equal(calls, firstCalls * 2);
+  await h.lab.ensureSim(combined); assert.equal(calls, firstCalls * 3);
   assert.equal(L.P.hardStop, -3); assert.equal(h.T.S.F, original);
 });
