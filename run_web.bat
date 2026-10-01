@@ -1,6 +1,6 @@
 @echo off
 chcp 65001 > nul
-cd /d "E:\2026\gemini\kiwoom1516"
+cd /d "%~dp0"
 
 echo ========================================================
 echo [Launch] 64-bit FastAPI & Lightweight Chart Platform
