@@ -65,3 +65,14 @@ git diff --cached
 
 대상 원격 저장소는 `https://github.com/hoonoh57/kiwoom1516.git`입니다.
 실제 업로드는 커밋 작성자와 스테이징 내용을 확인한 뒤 별도로 진행합니다.
+
+
+## S4.3R Python P0
+
+`s43r_engine.py`는 주문 기능이 없는 봉 단위 전략 엔진입니다. `evaluate()` 재생과 `S43REngine.step()`이 같은 지표·상태기계를 사용합니다. 원본 대조 결과와 사용법은 [S4.3R 명세서](docs/S4.3R_SPEC.md)에 있습니다.
+
+```powershell
+python -m unittest discover -s tests -p test_s43r_engine.py -v
+```
+
+고정 학습자료 20일 × 572종목 × 조기진입 ON/OFF·MACD 0.20/0.30 = 2,288개 설정별 결과를 Node.js 원본과 비교합니다. 실제 학습 파일은 로컬 `data/`에 필요합니다. 2026-09-30 이후 자료는 이 비교에서 제외합니다. P1 시세 수집 및 P2 주문 연동은 아직 구현하지 않았습니다.
