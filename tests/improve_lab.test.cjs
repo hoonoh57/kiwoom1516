@@ -29,7 +29,7 @@ function harness(storageValue = null) {
   T.openChart = (...args) => chartCalls.push(args);
   T.S.sha = require('node:crypto').createHash('sha256').update(original).digest('hex');
   T.S.ok = true;
-  vm.runInContext(read('static/improve_lab.js').replace(/buildUI\(\);\s*\}\)\(\);\s*$/, 'buildUI(); window.labTest = { L, run, applyCfg, classify, judge, renderDetail, freeze, again, neighbors, simRecs, loadVariant }; })();'), context);
+  vm.runInContext(read('static/improve_lab.js').replace(/buildUI\(\);\s*\}\)\(\);\s*$/, 'buildUI(); window.labTest = { L, run, applyCfg, classify, judge, renderDetail, freeze, again, neighbors, simRecs, loadVariant, ensureSim, simKey, recsFor }; })();'), context);
   return { T, actualOpenChart, lab: context.window.labTest, node, saved, downloads, alerts, chartCalls };
 }
 function loadDays(h) {
@@ -62,17 +62,22 @@ test('real data: baseline, all prescription grids, drilldown, freeze, repeat and
   const L = h.lab.L;
   assert.equal(L.P.stopMode, 'close');
   assert.equal(L.vOK, true);
-  assert.equal(L.sims.size, 10);
-  const off = L.sims.get(JSON.stringify({ t: 'off' }));
+  assert.ok(L.sims.size >= 14);
+  const off = L.sims.get(JSON.stringify([{ t: 'off' }, null]));
   assert.ok(off.some((r, i) => r.o.entered && r.o.idx !== L.recs0[i].o.idx), 'disabling early entry must resimulate later entries');
   const early = L.show.find(c => c.key === 'early');
   const neighbors = h.lab.neighbors('early', early.all, early.all.find(p => p.g.t === 'off'));
   assert.deepEqual(Array.from(neighbors, p => p.g.v), ['0906', 30, .35]);
   assert.equal(L.bAll.n, 230);
   assert.equal(L.bAll.sum.toFixed(2), '-16.88');
-  assert.deepEqual(Array.from(L.show.slice(0, 3), c => c.all.length), [10, 9, 20]);
+  assert.deepEqual(Array.from(L.show.slice(0, 4), c => c.all.length), [10, 4, 9, 20]);
   assert.match(h.node('lb-sum').innerHTML, /큰 손절/);
   assert.match(h.node('lb-cands').innerHTML, /처방 후보/);
+  const hs = L.show.find(c => c.key === 'hs');
+  assert.ok(hs.all.every(p => p.g !== -3));
+  assert.match(hs.best.label, /하드스탑 -3% →/);
+  h.lab.renderDetail(L.show.indexOf(hs));
+  assert.match(h.node('lb-detail').innerHTML, /좋아진 거래/);
   assert.equal(h.node('lb-run').disabled, false);
   for (const c of L.show) {
     const p = c.best;
@@ -88,7 +93,7 @@ test('real data: baseline, all prescription grids, drilldown, freeze, repeat and
   assert.equal(frozen.mode, 'real'); assert.equal(frozen.common.stop, '봉종가');
   assert.equal(frozen.sha, h.T.S.sha);
   const originalEngine = h.T.S.F;
-  assert.equal(L.vOK, true); assert.equal(L.sims.size, 10);
+  assert.equal(L.vOK, true); assert.ok(L.sims.size >= 14);
   const expected = L.show[0].best.ev.all.sum;
   h.lab.again(L.show[0]);
   while (L.busy) await new Promise(resolve => setImmediate(resolve));
@@ -143,7 +148,7 @@ test('variant rejects source hash mismatch and restores shared engine after eval
   const original = h.T.S.F;
   h.lab.L.P = h.T.params(); h.lab.L.days = h.T.S.days;
   h.T.evalCase = () => { throw new Error('injected evaluation failure'); };
-  await assert.rejects(h.lab.simRecs({ t: 'off' }, 'test'), /injected evaluation failure/);
+  await assert.rejects(h.lab.simRecs({ early: { t: 'off' } }, 'test'), /injected evaluation failure/);
   assert.equal(h.T.S.F, original);
 });
 
@@ -153,4 +158,33 @@ test('damage verdict uses amounts, including zero tolerance, rather than winner 
   let p = make(); h.lab.judge(p); assert.equal(p.verdict, '추천');
   p = make(); p.ev.loss = 5.01; h.lab.judge(p); assert.equal(p.verdict, '보류');
   h.lab.L.Q.dmg = 0; p = make(); h.lab.judge(p); assert.equal(p.verdict, '보류');
+});
+
+test('hard-stop reruns match the original engine, joint variants are isolated and cache is reused', async () => {
+  const h = harness(); loadDays(h);
+  const L = h.lab.L;
+  L.P = { ...h.T.params(), real: true, gate: false, stopMode: 'close' };
+  L.days = h.T.usedDays(); L.sims = new Map();
+  await h.lab.loadVariant();
+  const original = h.T.S.F, evalCase = h.T.evalCase;
+  let calls = 0;
+  h.T.evalCase = (...args) => { calls++; return evalCase(...args); };
+  const cfg = { hs: -2.5 };
+  await h.lab.ensureSim(cfg);
+  const recs = h.lab.recsFor(cfg), firstCalls = calls;
+  assert.ok(firstCalls > 0);
+  for (const r of recs) {
+    const direct = evalCase(r.d, r.c, { ...L.P, hardStop: -2.5 }, 'capture', L.P.N0);
+    assert.deepEqual(r.o, direct.o);
+  }
+  await h.lab.ensureSim({ ...cfg, rise: 12, trail: { a: 5, b: 2 } });
+  assert.equal(calls, firstCalls);
+  assert.equal(h.lab.recsFor(cfg), recs);
+  const combined = { early: { t: 'macd', v: .3 }, hs: -2.5 };
+  await h.lab.ensureSim(combined);
+  assert.equal(calls, firstCalls * 2);
+  assert.notEqual(h.lab.recsFor(combined), recs);
+  assert.ok(h.lab.recsFor(combined).some((r, i) => r.o.idx !== recs[i].o.idx));
+  await h.lab.ensureSim(combined); assert.equal(calls, firstCalls * 2);
+  assert.equal(L.P.hardStop, -3); assert.equal(h.T.S.F, original);
 });

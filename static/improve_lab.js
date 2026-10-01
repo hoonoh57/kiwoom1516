@@ -26,6 +26,9 @@ const FAM = [
             [0.25, 0.30, 0.35].map(v => ({ t: 'macd', v }))],
     label: g => g.t === 'off' ? '조기가속 진입 끄기 (재시뮬)' : g.t === 'time' ? `조기진입 시한 09:12→${HM(g.v)} (재시뮬)`
       : g.t === 'cum' ? `조기진입 누적대금 15→${g.v}억 (재시뮬)` : `조기진입 MACD 0.20→${g.v.toFixed(2)} (재시뮬)` },
+  { key: 'hs', title: '하드스탑', target: '큰 손절', sim: true,
+    grids: [[-2.0, -2.5, -3.0, -3.5, -4.0]],
+    label: v => `하드스탑 ${Number(L.P ? L.P.hardStop : T.params().hardStop)}% → ${v}% (재시뮬)` },
   { key: 'rise', title: '추격 상한', target: '큰 손절',
     grids: [[8, 10, 12, 14, 16, 18, 20, 22, 25]],
     label: v => `진입 시 전일종가 대비 +${v}% 넘으면 진입 안 함` },
@@ -42,8 +45,6 @@ const cfgText = cfg => {
 const EA0 = { on: true, t: '0912', cum: 15, macd: 0.20 };
 const EA = { ...EA0 };
 let FV = null;
-const FE = FAM.find(F => F.key === 'early');
-const eKey = g => JSON.stringify(g);
 const eaOf = g => Object.assign({}, EA0, !g ? {} : g.t === 'off' ? { on: false } : g.t === 'time' ? { t: g.v } : g.t === 'cum' ? { cum: g.v } : { macd: g.v });
 const setEA = g => Object.assign(EA, eaOf(g));
 async function loadVariant() {
@@ -70,10 +71,19 @@ async function loadVariant() {
     src2.slice(m.index + m[0].length, end) + '\n;return (typeof evaluateStrategyTrade === "function") ? evaluateStrategyTrade : null;')(fakeWin, fakeDoc, EA);
   if (!FV) throw new Error('변형 엔진에서 evaluateStrategyTrade를 찾지 못했습니다.');
 }
-async function simRecs(g, tag) {
-  return buildRecs(L.P, L.days, tag, g);
+const simKey = cfg => JSON.stringify([cfg.early || null, cfg.hs ?? null]);
+const needSim = cfg => !!cfg.early || cfg.hs != null;
+async function simRecs(cfg, tag) {
+  const P = cfg.hs != null ? { ...L.P, hardStop: cfg.hs } : L.P;
+  // Keep each engine substitution synchronous so other tabs always see the original engine.
+  return buildRecs(P, L.days, tag, cfg.early || null);
 }
-const recsFor = cfg => cfg.early ? L.sims.get(eKey(cfg.early)) : L.recs0;
+async function ensureSim(cfg) {
+  if (!needSim(cfg) || L.sims.has(simKey(cfg))) return;
+  const t = FAM.filter(F => F.sim && cfg[F.key] != null).map(F => F.label(cfg[F.key])).join(' + ');
+  L.sims.set(simKey(cfg), await simRecs(cfg, '재시뮬 · ' + t));
+}
+const recsFor = cfg => needSim(cfg) ? L.sims.get(simKey(cfg)) : L.recs0;
 
 /* ───────── 화면 ───────── */
 function buildUI() {
@@ -184,7 +194,7 @@ function halves(res) {
 }
 function evaluate(cfg) {
   const recs = recsFor(cfg);
-  if (!recs) throw new Error('조기진입 재시뮬 결과가 없습니다: ' + eKey(cfg.early));
+  if (!recs) throw new Error('재시뮬 결과가 없습니다: ' + simKey(cfg));
   const res = recs.map(r => applyCfg(r, cfg)), all = mets(res), h = halves(res);
   let fixed = 0, broken = 0, gain = 0, loss = 0, nN = 0, nE = 0; const changes = [];
   res.forEach((x, i) => {
@@ -222,32 +232,43 @@ function neighbors(key, pts, p) {
     return F.grids.slice(1).map((l, gi) => pts.find(q => q.pos[0] === gi + 1 && q.pos[1] === l.length - 1)).filter(Boolean);
   return pts.filter(q => q.pos[0] === p.pos[0] && dist(p.pos, q.pos) === 1);
 }
-function search() {
-  return FAM.map(F => {
+async function search() {
+  const out = [], cur = L.baseCfg.hs ?? Number(L.P.hardStop);
+  for (const F of FAM) {
     const pts = [];
     if (F.grid2) F.grid2.a.forEach((a, ia) => F.grid2.b.forEach((b, ib) => pts.push({ g: { a, b }, pos: [0, ia, ib] })));
-    else F.grids.forEach((list, gi) => list.forEach((g, j) => pts.push({ g, pos: [gi, j] })));
-    pts.forEach(p => { p.label = F.label(p.g); p.ev = evaluate({ ...L.baseCfg, [F.key]: p.g }); });
-    pts.forEach(p => {
-      p.stable = neighbors(F.key, pts, p).every(q => q.ev.dAll > 0);
-      judge(p);
-    });
+    else F.grids.forEach((list, gi) => list.forEach((g, j) => {
+      if (F.key === 'hs' && Math.abs(g - cur) < 1e-9) return;
+      pts.push({ g, pos: [gi, j] });
+    }));
+    for (const p of pts) {
+      const cfg = { ...L.baseCfg, [F.key]: p.g };
+      await ensureSim(cfg);
+      p.label = F.label(p.g); p.ev = evaluate(cfg);
+    }
+    pts.forEach(p => { p.stable = neighbors(F.key, pts, p).every(q => q.ev.dAll > 0); judge(p); });
     pts.sort((x, y) => (y.pass - x.pass) || (y.ev.dAll - x.ev.dAll));
-    return { key: F.key, title: F.title, target: F.target, best: pts[0], all: pts };
-  });
+    out.push({ key: F.key, title: F.title, target: F.target, best: pts[0], all: pts });
+  }
+  return out;
 }
-function stack(cands) {
+async function stack(cands) {
   const order = cands.filter(c => c.best.ev.dAll > 0).sort((a, b) => b.best.ev.dAll - a.best.ev.dAll);
   if (order.length < 2) return null;
   let cfg = { ...L.baseCfg }, cur = null, stable = true; const used = [];
   for (const c of order) {
     const pre = cur ? cur.dAll : 0; let best = null;
     for (const p of c.all) {
-      const ev = evaluate({ ...cfg, [c.key]: p.g });
+      const cf = { ...cfg, [c.key]: p.g }; await ensureSim(cf);
+      const ev = evaluate(cf);
       if (ev.dAll > pre && ev.dA > 0 && ev.dB > 0 && (!best || ev.dAll > best.ev.dAll)) best = { p, ev };
     }
     if (!best) continue;
-    const st = neighbors(c.key, c.all, best.p).every(q => evaluate({ ...cfg, [c.key]: q.g }).dAll > pre);
+    let st = true;
+    for (const q of neighbors(c.key, c.all, best.p)) {
+      const cf = { ...cfg, [c.key]: q.g }; await ensureSim(cf);
+      if (evaluate(cf).dAll <= pre) { st = false; break; }
+    }
     cfg = { ...cfg, [c.key]: best.p.g }; cur = best.ev; stable = stable && st; used.push({ c, p: best.p });
   }
   if (used.length < 2) return null;
@@ -282,7 +303,7 @@ function renderSum() {
     ${b.n}건 · 순익 ${fp(b.sum)} (앞 ${fp(L.bA)} / 뒤 ${fp(L.bB)}) · 승률 ${b.win.toFixed(1)}% · PF ${f2(b.pf)}<br>
     문제 거래: <b>큰 손절 ${big.length}건</b> 합 ${fp(big.reduce((s, y) => s + y.x.net, 0))} ·
     <b>고MFE 저수익 ${hm.length}건</b> (진입 후 최고 평균 +${avg(hm, y => y.r.f.mfe).toFixed(1)}% → 실현 평균 ${fp(avg(hm, y => y.x.pnl))})
-    <details><summary class="hint">큰 손절이 수익거래와 다른 점 (진입 시점에 알 수 있던 값, 차이 큰 순)</summary>${diag().map(line).join('<br>')}</details></div>`;
+    <details open><summary class="hint">큰 손절이 수익거래와 다른 점 (진입 시점에 알 수 있던 값, 차이 큰 순)</summary>${diag().map(line).join('<br>')}</details></div>`;
 }
 
 /* ───────── 후보 표 · 거래별 변화 ───────── */
@@ -382,14 +403,13 @@ async function run() {
     }
     await loadVariant();
     if (!L.vOK) {
-      const chk = await simRecs(null, '변형 엔진 검사');
+      const chk = await simRecs({}, '변형 엔진 검사');
       const bad = chk.filter((r, i) => { const a = r.o, b = L.recs0[i].o;
         return a.entered !== b.entered || a.open !== b.open || a.idx !== b.idx || Math.abs((a.net || 0) - (b.net || 0)) > 1e-9; }).length;
       if (bad) throw new Error(`변형 엔진 검사 실패: 원래 조건(09:12·15억·0.20)인데 원본과 다른 거래 ${bad}건`);
       L.vOK = true;
     }
-    const need = FE.grids.flat(); if (L.baseCfg.early) need.push(L.baseCfg.early);
-    for (const g of need) if (!L.sims.has(eKey(g))) L.sims.set(eKey(g), await simRecs(g, '재시뮬 · ' + FE.label(g)));
+    await ensureSim(L.baseCfg);
     if (L.mode !== mode && !Object.keys(L.baseCfg).length) L.baseName = '';
     L.mode = mode;
     L.Q = { big: parseFloat($('lb-big').value) || -3, mfe: parseFloat($('lb-mfe').value) || 5,
@@ -402,11 +422,11 @@ async function run() {
     const h = halves(L.baseRes); L.bA = h.A; L.bB = h.B;
     renderSum();
     $('lb-prog').textContent = '처방 탐색 중…'; await tick();
-    const cands = search(), cb = stack(cands);
+    const cands = await search(), cb = await stack(cands);
     L.show = cb ? cands.concat(cb) : cands;
     renderCands();
     $('lb-detail').innerHTML = '';
-    $('lb-prog').textContent = `완료 · 변형엔진 검사 ✓ · 조기진입 재시뮬 ${L.sims.size}종 · 처방 값 ${cands.reduce((s, c) => s + c.all.length, 0)}개 시험`;
+    $('lb-prog').textContent = `완료 · 변형엔진 검사 ✓ · 재시뮬 ${L.sims.size}종 · 처방 값 ${cands.reduce((s, c) => s + c.all.length, 0)}개 시험`;
   } catch (err) {
     console.error(err);
     $('lb-prog').innerHTML = `<span class="bad">오류: ${esc(err.message)}</span>`;
