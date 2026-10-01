@@ -322,7 +322,9 @@ function renderSum() {
     ${b.n}건 · 순익 ${fp(b.sum)} (앞 ${fp(L.bA)} / 뒤 ${fp(L.bB)}) · 승률 ${b.win.toFixed(1)}% · PF ${f2(b.pf)}<br>
     문제 거래: <b>큰 손절 ${big.length}건</b> 합 ${fp(big.reduce((s, y) => s + y.x.net, 0))} ·
     <b>고MFE 저수익 ${hm.length}건</b> (진입 후 최고 평균 +${avg(hm, y => y.r.f.mfe).toFixed(1)}% → 실현 평균 ${fp(avg(hm, y => y.x.pnl))})
-    <details open><summary class="hint">큰 손절이 수익거래와 다른 점 (진입 시점에 알 수 있던 값, 차이 큰 순)</summary>${diag().map(line).join('<br>')}</details></div>`;
+    <details open><summary class="hint">큰 손절이 수익거래와 다른 점 (진입 시점에 알 수 있던 값, 차이 큰 순)</summary>${diag().map(line).join('<br>')}</details>
+    <div style="margin-top:6px"><button class="sub" id="lb-freezebase">이 기준을 재시뮬 수치로 박제</button></div></div>`;
+  $('lb-freezebase').addEventListener('click', freezeBase);
 }
 
 /* ───────── 후보 표 · 거래별 변화 ───────── */
@@ -375,6 +377,32 @@ function freeze(c) {
               gain: e.gain, loss: e.loss, normal: e.nN, early: e.nE },
     criteria: { ...L.Q },
     createdAt: new Date().toISOString() };
+  L.versions.push(v);
+  localStorage.setItem('s4lab.versions', JSON.stringify(L.versions));
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([JSON.stringify(v, null, 2)], { type: 'application/json' }));
+  a.download = `${id}.json`; a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  renderVers();
+}
+function freezeBase() {
+  if (L.busy) return alert('계산이 끝난 뒤 기준을 박제하세요.');
+  if (!Object.keys(L.baseCfg).length) return alert('처방이 없는 기준은 박제할 필요가 없습니다.');
+  if (L.versions.some(v => v.lab && JSON.stringify(v.cfg) === JSON.stringify(L.baseCfg)))
+    return alert('이 처방은 이미 재시뮬 수치로 박제되어 있습니다.');
+  const saved = L.versions.find(v => JSON.stringify(v.cfg) === JSON.stringify(L.baseCfg));
+  const parent = saved ? L.versions.find(v => v.id === saved.parent) : null;
+  const b = L.bAll, id = `S4.3-L${L.versions.length + 1}`;
+  const v = { id, parent: saved ? saved.parent : L.baseName, cfg: { ...L.baseCfg },
+    text: cfgText(L.baseCfg) + (saved ? ` [${saved.id} 재계산]` : ''),
+    verdict: saved ? saved.verdict : '기준', why: saved ? `${saved.id}를 원본 엔진 재시뮬로 재계산` : '',
+    mode: L.mode, sha: S.sha, lab: LAB_VER,
+    period: `${L.dates[0]}~${L.dates[L.dates.length - 1]}`, days: L.dates.length,
+    common: { N0: L.P.N0, macd: L.P.macd, cumGate: L.P.cumGate, minCum: L.P.minCum, hardStop: L.P.hardStop, cost: L.P.cost, stop: '봉종가' },
+    result: { n: b.n, sum: +b.sum.toFixed(2), win: +b.win.toFixed(1), pf: b.pf === Infinity ? null : +b.pf.toFixed(2),
+              vsParent: parent ? +(b.sum - parent.result.sum).toFixed(2) : 0,
+              frontAbs: +L.bA.toFixed(2), backAbs: +L.bB.toFixed(2) },
+    criteria: { ...L.Q }, createdAt: new Date().toISOString() };
   L.versions.push(v);
   localStorage.setItem('s4lab.versions', JSON.stringify(L.versions));
   const a = document.createElement('a');

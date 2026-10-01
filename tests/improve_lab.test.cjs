@@ -29,7 +29,7 @@ function harness(storageValue = null) {
   T.openChart = (...args) => chartCalls.push(args);
   T.S.sha = require('node:crypto').createHash('sha256').update(original).digest('hex');
   T.S.ok = true;
-  vm.runInContext(read('static/improve_lab.js').replace(/buildUI\(\);\s*\}\)\(\);\s*$/, 'buildUI(); window.labTest = { L, run, applyCfg, classify, judge, renderDetail, freeze, again, neighbors, simRecs, loadVariant, ensureSim, simKey, recsFor }; })();'), context);
+  vm.runInContext(read('static/improve_lab.js').replace(/buildUI\(\);\s*\}\)\(\);\s*$/, 'buildUI(); window.labTest = { L, run, applyCfg, classify, judge, renderDetail, freeze, freezeBase, renderSum, again, neighbors, simRecs, loadVariant, ensureSim, simKey, recsFor }; })();'), context);
   return { T, actualOpenChart, lab: context.window.labTest, node, saved, downloads, alerts, chartCalls };
 }
 function loadDays(h) {
@@ -199,4 +199,39 @@ test('hard-stop reruns match the original engine, joint variants are isolated an
   assert.ok(h.lab.recsFor(combined).some((r, i) => r.o.idx !== recs[i].o.idx));
   await h.lab.ensureSim(combined); assert.equal(calls, firstCalls * 3);
   assert.equal(L.P.hardStop, -3); assert.equal(h.T.S.F, original);
+});
+
+test('freeze current baseline preserves old records and stores recalculated totals and parent delta', () => {
+  // Persistence fixture only: these numbers are supplied examples, not a reconstruction of the user's L3.
+  const h = harness(), L = h.lab.L;
+  L.P = h.T.params(); L.baseCfg = { early: { t: 'macd', v: .3 }, rise: 22 };
+  L.baseName = 'S4.3-L3'; L.mode = 'real'; L.dates = ['20260901', '20260929'];
+  L.Q = { big: -3, mfe: 5, ratio: 30, dmg: 50 };
+  L.versions = [
+    { id: 'S4.3-L1', cfg: { early: { t: 'macd', v: .3 } }, result: { sum: 27.65 } },
+    { id: 'S4.3-L2', cfg: { rise: 18 }, result: { sum: 40 } },
+    { id: 'S4.3-L3', parent: 'S4.3-L1', cfg: { ...L.baseCfg }, verdict: '추천', result: { sum: 56.44 } }
+  ];
+  L.bAll = { n: 194, sum: 62.56, win: 50.123, pf: 1.234 }; L.bA = 30; L.bB = 32.56;
+  L.cls = []; L.baseRes = [];
+  h.lab.renderSum();
+  assert.match(h.node('lb-sum').innerHTML, /이 기준을 재시뮬 수치로 박제/);
+  h.node('lb-freezebase').events.click();
+  const v = JSON.parse(h.saved.get('s4lab.versions'))[3];
+  assert.equal(v.id, 'S4.3-L4'); assert.equal(v.parent, 'S4.3-L1');
+  assert.equal(v.result.n, 194); assert.equal(v.result.sum, 62.56); assert.equal(v.result.vsParent, 34.91);
+  assert.equal(v.result.frontAbs, 30); assert.equal(v.result.backAbs, 32.56);
+  assert.equal(v.lab, 'lab-resim-3'); assert.equal(v.sha, h.T.S.sha);
+  assert.equal(L.versions[2].result.sum, 56.44);
+  assert.match(v.text, /S4.3-L3 재계산/);
+  assert.equal(h.downloads[0].download, 'S4.3-L4.json');
+  h.lab.freezeBase(); assert.equal(L.versions.length, 4); assert.equal(h.downloads.length, 1);
+  assert.match(h.alerts.at(-1), /이미 재시뮬/);
+});
+
+test('baseline freezing blocks empty prescriptions and calculations still in progress', () => {
+  const h = harness(); h.lab.freezeBase(); assert.match(h.alerts.at(-1), /처방이 없는/);
+  h.lab.L.busy = true; h.lab.L.baseCfg = { hs: -2.5 };
+  h.lab.freezeBase(); assert.match(h.alerts.at(-1), /계산이 끝난 뒤/);
+  assert.equal(h.downloads.length, 0); assert.equal(h.saved.size, 0);
 });
