@@ -80,6 +80,28 @@
             </button>
         </div>
     </header>
+    <!-- 기간·MFE 지정 캔들 일괄 다운로드 (static/audit_downloader.js) -->
+    <details class="bg-slate-900 border-b border-slate-800 px-4 py-1 text-xs select-none">
+        <summary class="cursor-pointer text-sky-300 font-bold">기간·MFE 지정 캔들 일괄 다운로드</summary>
+        <div class="flex flex-wrap items-center gap-2 py-2">
+            <span class="text-slate-400">시작일</span>
+            <input id="audit-start" type="date" value="2026-09-30" class="bg-slate-800 border border-slate-700 rounded px-1 py-0.5 font-mono">
+            <span class="text-slate-400">종료일</span>
+            <input id="audit-end" type="date" value="2026-10-01" class="bg-slate-800 border border-slate-700 rounded px-1 py-0.5 font-mono">
+            <span class="text-slate-400 ml-2">MFE</span>
+            <select id="audit-comparison" class="bg-slate-800 border border-slate-700 rounded px-1 py-0.5">
+                <option value="gt" selected>&gt; 초과</option>
+                <option value="gte">≥ 이상</option>
+            </select>
+            <input id="audit-mfe" type="number" step="0.5" value="5.5" class="w-14 bg-slate-800 border border-amber-500 rounded px-1 text-center text-amber-300 font-bold">
+            <span class="text-amber-300">%</span>
+            <button id="btn-audit-batch" class="bg-sky-700 hover:bg-sky-600 text-white font-bold px-3 py-1 rounded ml-2">조건 종목 캔들 일괄 다운로드</button>
+            <button id="btn-audit-stop" disabled class="bg-slate-700 hover:bg-slate-600 text-white px-3 py-1 rounded">조회 후 중단</button>
+            <span class="text-slate-500">조건식·검색 시각·TF는 상단 값(92 · 090300 · 360틱)을 씁니다. 최대 31일.</span>
+        </div>
+        <div id="audit-download-status" class="text-emerald-300 font-mono pb-1"></div>
+        <div id="audit-download-links" class="pb-2"></div>
+    </details>
 
     <!-- 2. 지표 레이어 토글 & 통계 요약 바 -->
     <div class="h-10 bg-slate-900/90 border-b border-slate-800 px-4 flex items-center justify-between text-xs select-none">
@@ -264,6 +286,23 @@
 
     <script src="/static/app.js"></script>
     <script src="/static/lab.js"></script>
+    <script src="/static/audit_downloader.js"></script>
+    <script>
+    (function () {
+        if (!window.AuditDownloader) { console.error('audit_downloader.js를 불러오지 못했습니다.'); return; }
+        const v = id => { const el = document.getElementById(id); return el ? (el.type === 'checkbox' ? el.checked : el.value) : null; };
+        window.AuditDownloader.mount({
+            document,
+            fetch: window.fetch.bind(window),
+            getSettings: () => ({
+                conditionNo: v('edit-cond'), captureTime: v('edit-time'),
+                applyMfeGate: v('chk-apply-mfe-gate'), baseRate: Number(v('input-base-rate')),
+                applyCumAmtGate: v('chk-apply-cum-amt-gate'), minCumAmt: Number(v('input-min-cum-amt')),
+                hardStopLossPct: Number(v('input-hard-stop')), macdBase: v('input-macd-base')
+            })
+        });
+    })();
+    </script>
 
 </body>
 </html>

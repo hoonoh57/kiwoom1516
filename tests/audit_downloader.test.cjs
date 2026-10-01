@@ -130,14 +130,15 @@ test('worker requests never overlap', async () => {
     assert.equal(maxActive, 1); assert.equal(io.calls.length, 9);
 });
 
-test('UI exposes defaults, comparator, stop, progress and module before app', () => {
+test('UI exposes defaults, comparator, stop, progress and module mounted after lab', () => {
     const html = fs.readFileSync(path.join(__dirname, '../static/index.html'), 'utf8');
-    assert.match(html, /id="audit-start"[^>]+value="2026-09-16"/);
-    assert.match(html, /id="audit-end"[^>]+value="2026-09-18"/);
+    assert.match(html, /id="audit-start"[^>]+value="2026-09-30"/);
+    assert.match(html, /id="audit-end"[^>]+value="2026-10-01"/);
     assert.match(html, /value="gt" selected/);
     assert.match(html, /id="audit-mfe"[^>]+value="5.5"/);
     assert.match(html, /id="btn-audit-stop" disabled/);
-    assert.ok(html.indexOf('/static/audit_downloader.js') < html.indexOf('/static/app.js'));
+    assert.ok(html.indexOf('src="/static/audit_downloader.js"') > html.indexOf('src="/static/lab.js"'));
+    assert.match(html, /window\.AuditDownloader\.mount\(/);
 });
 
 test('UI click saves one bundle, offers per-date files, and restores disabled controls', async () => {
